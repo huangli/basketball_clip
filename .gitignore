@@ -20,3 +20,6 @@ packaging/**/cleanroom/
 # 工具缓存
 .pytest_cache/
 .ruff_cache/
+
+# 本地 SDD 过程稿（含私人上下文，永不入库）
+.superpowers/
