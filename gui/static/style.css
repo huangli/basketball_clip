@@ -1,0 +1,434 @@
+/* basketball-clip 向导样式：干净朴素，无框架无 CDN（离线可用） */
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+  color: #222;
+  background: #f5f6f8;
+}
+
+/* ---- 顶栏 ---- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 24px;
+  background: #1f3a5f;
+  color: #fff;
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+/* ---- 布局 ---- */
+
+.layout {
+  display: flex;
+  min-height: calc(100vh - 52px);
+}
+
+.sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  background: #fff;
+  border-right: 1px solid #e2e5ea;
+  padding: 16px 12px;
+}
+
+.step-content {
+  flex: 1;
+  padding: 24px 32px;
+  max-width: 860px;
+}
+
+/* ---- 场次面板 ---- */
+
+.session-panel h2 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: #667;
+  font-weight: 600;
+}
+
+.session-list {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+}
+
+.session-list li {
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.session-list li:hover {
+  background: #eef2f7;
+}
+
+.session-list li.active {
+  background: #e3ecf7;
+  font-weight: 600;
+}
+
+.session-list .session-stage {
+  display: block;
+  font-size: 12px;
+  color: #889;
+  font-weight: 400;
+}
+
+.session-list .empty {
+  color: #99a;
+  cursor: default;
+}
+
+.session-list .empty:hover {
+  background: none;
+}
+
+/* ---- 步骤条 ---- */
+
+.step-nav ol {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+  counter-reset: step;
+}
+
+.step-nav li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  color: #445;
+}
+
+.step-nav li:hover {
+  background: #eef2f7;
+}
+
+.step-nav li.current {
+  background: #1f3a5f;
+  color: #fff;
+}
+
+.step-nav li .step-no {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #d6dce4;
+  color: #445;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.step-nav li.current .step-no {
+  background: #fff;
+  color: #1f3a5f;
+}
+
+.step-nav li.done .step-no {
+  background: #2e9e5b;
+  color: #fff;
+}
+
+/* ---- 操作区 ---- */
+
+.step-content h2 {
+  margin: 0 0 6px;
+  font-size: 20px;
+}
+
+.step-content .step-desc {
+  margin: 0 0 18px;
+  color: #667;
+  font-size: 14px;
+}
+
+.field {
+  margin-bottom: 14px;
+}
+
+.field label {
+  display: block;
+  font-size: 13px;
+  color: #445;
+  margin-bottom: 4px;
+}
+
+.field input[type="text"],
+.field input[type="number"] {
+  width: 100%;
+  max-width: 520px;
+  padding: 8px 10px;
+  border: 1px solid #c8cfd8;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.field .hint {
+  font-size: 12px;
+  color: #889;
+  margin-top: 4px;
+}
+
+.notice {
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  margin: 10px 0;
+  background: #fff7e0;
+  border: 1px solid #ecd27a;
+  color: #6b5510;
+}
+
+.notice.info {
+  background: #e8f2fd;
+  border-color: #a8c8ee;
+  color: #1d4e89;
+}
+
+.file-list {
+  margin: 8px 0;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1px solid #e2e5ea;
+  border-radius: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 13px;
+}
+
+.file-list li {
+  padding: 2px 0;
+  list-style: none;
+}
+
+.file-list ul {
+  margin: 0;
+  padding: 0;
+}
+
+.output-list {
+  margin: 8px 0;
+  padding: 10px 12px 10px 28px;
+  background: #fff;
+  border: 1px solid #e2e5ea;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.button-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* ---- 按钮 ---- */
+
+.btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+  background: #1f3a5f;
+  color: #fff;
+}
+
+.btn:hover:not(:disabled) {
+  background: #2a4d7c;
+}
+
+.btn:disabled {
+  background: #b8c0ca;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  background: #fff;
+  color: #1f3a5f;
+  border: 1px solid #1f3a5f;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: #eef2f7;
+}
+
+.btn-secondary:disabled {
+  background: #f0f2f4;
+  color: #99a;
+  border-color: #c8cfd8;
+}
+
+.btn-danger {
+  background: #b03a2e;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #c44b3e;
+}
+
+.btn-block {
+  width: 100%;
+}
+
+.btn-link {
+  background: none;
+  border: none;
+  color: #1f3a5f;
+  text-decoration: underline;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0;
+}
+
+/* ---- 任务进度面板 ---- */
+
+.task-panel {
+  margin-top: 16px;
+  padding: 14px;
+  background: #fff;
+  border: 1px solid #e2e5ea;
+  border-radius: 8px;
+}
+
+.task-panel .task-status {
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+
+.task-panel .task-status.running {
+  color: #1d4e89;
+}
+
+.task-panel .task-status.done {
+  color: #2e9e5b;
+}
+
+.task-panel .task-status.failed {
+  color: #b03a2e;
+}
+
+.progress-track {
+  height: 8px;
+  background: #e6eaef;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.progress-bar {
+  height: 100%;
+  background: #2e9e5b;
+  width: 0;
+  transition: width 0.3s;
+}
+
+/* total 不可知降级：不定态条纹滚动 */
+.progress-track.indeterminate .progress-bar {
+  width: 30%;
+  background: #1d4e89;
+  animation: slide 1.2s ease-in-out infinite;
+}
+
+@keyframes slide {
+  0% { margin-left: -30%; }
+  100% { margin-left: 100%; }
+}
+
+.log-box {
+  background: #16191d;
+  color: #c9d1d9;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  border-radius: 6px;
+  height: 220px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0 0 10px;
+}
+
+.fail-tail {
+  margin-top: 8px;
+}
+
+.fail-tail summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: #b03a2e;
+}
+
+.fail-tail pre {
+  background: #fbf0ee;
+  border: 1px solid #e5b7b0;
+  padding: 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+details.advanced {
+  margin: 12px 0;
+}
+
+details.advanced summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: #667;
+}
+
+/* ---- Toast ---- */
+
+.toast-container {
+  position: fixed;
+  top: 60px;
+  right: 20px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.toast {
+  padding: 10px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  color: #fff;
+  background: #333;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  max-width: 420px;
+}
+
+.toast.error {
+  background: #b03a2e;
+}
+
+.toast.success {
+  background: #2e9e5b;
+}

@@ -3,10 +3,29 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>basketball-clip</title>
+  <title>basketball-clip 向导</title>
+  <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <h1>basketball-clip 向导</h1>
-  <p>前端向导开发中（C-3 阶段填充）。后端 API 已就绪：<code>/api/health</code>。</p>
+  <header class="topbar">
+    <h1>basketball-clip 进球集锦向导</h1>
+    <button id="btn-diagnostics" class="btn btn-secondary" disabled
+            title="诊断导出将在下一任务（D-1）落地后可用">导出诊断日志</button>
+  </header>
+  <div class="layout">
+    <aside class="sidebar">
+      <section class="session-panel">
+        <h2>已有场次</h2>
+        <ul id="session-list" class="session-list"></ul>
+        <button id="btn-new-session" class="btn btn-secondary btn-block">新建场次</button>
+      </section>
+      <nav class="step-nav" aria-label="向导步骤">
+        <ol id="step-nav-list"></ol>
+      </nav>
+    </aside>
+    <main id="step-content" class="step-content"></main>
+  </div>
+  <div id="toast-container" class="toast-container" aria-live="polite"></div>
+  <script src="/static/app.js"></script>
 </body>
 </html>
