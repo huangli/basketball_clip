@@ -16,6 +16,11 @@ __pycache__/
 packaging/**/build/
 packaging/**/dist/
 packaging/**/cleanroom/
+# 打包资产（~500MB+ 下载产物，fetch_assets.py 可重建）与构建日志
+packaging/assets/
+packaging/build.log
+/dist/
+/build/
 
 # 工具缓存
 .pytest_cache/

@@ -37,6 +37,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from gui.diagnostics import build_diagnostics_zip
+from gui.frozen import app_dir, resource_dir
 from gui.runner import (
     TERMINAL_STATUSES,
     GuiRunnerError,
@@ -48,10 +49,12 @@ from gui.runner import (
 
 logger = logging.getLogger(__name__)
 
-REPO_ROOT: Path = Path(__file__).resolve().parent.parent
+# frozen（PyInstaller）态：REPO_ROOT = exe 同级目录（用户可写，work/output/子进程 cwd 基准），
+# static 走 _MEIPASS 只读资源；开发态两者均为仓库根（gui/frozen.py 口径）
+REPO_ROOT: Path = app_dir()
 DEFAULT_WORK_DIR: Path = REPO_ROOT / "work"
 DEFAULT_OUTPUT_DIR: Path = REPO_ROOT / "output"
-DEFAULT_STATIC_DIR: Path = Path(__file__).resolve().parent / "static"
+DEFAULT_STATIC_DIR: Path = resource_dir() / "gui" / "static"
 
 # 场次 ID / 路径段校验：中英文、数字、下划线、连字符；点号一律不允许（从源头掐死 ..）
 SESSION_RE: re.Pattern[str] = re.compile(r"[A-Za-z0-9_一-鿿-]+")

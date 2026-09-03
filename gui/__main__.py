@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import logging
 import socket
+import sys
 import threading
 import webbrowser
 
 import uvicorn
+
+from gui import frozen
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +43,16 @@ def _find_free_port(host: str = HOST, start: int = DEFAULT_PORT, tries: int = PO
 
 
 def main() -> None:
-    """启动 GUI 服务（阻塞至 Ctrl+C）。"""
+    """启动 GUI 服务（阻塞至 Ctrl+C）。
+
+    frozen（PyInstaller）态先做两件事：multiprocessing spawn 守卫；argv[1] 为
+    scripts/ 内 .py 时 exe 充当 Python 解释器分发执行（runner 以 sys.executable
+    起子进程的既有口径不变），分发命中则不起 GUI。
+    """
+    frozen.freeze_support_guard()
+    if frozen.dispatch_script(sys.argv):
+        return
+    frozen.bootstrap_env()
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     )
