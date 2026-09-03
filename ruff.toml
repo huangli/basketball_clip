@@ -1,0 +1,38 @@
+# ruff.toml — 唯一 lint/format 权威（详见 rules.md §10）
+# Python 3.14.3 / 半截篮项目
+
+line-length = 100
+target-version = "py310"
+
+# 源根：让 isort 把 scripts/ 下的模块（如 geom）识别为 first-party
+src = [".", "scripts"]
+
+# 不扫描已归档与工具目录
+extend-exclude = [
+    "archive",
+    ".codewale",
+    ".opencode",
+    ".git",
+]
+
+[lint]
+# 规则集（落地强制类型注解等）
+#   E/W  pycodestyle（含行长 E501）
+#   F    pyflakes
+#   I    isort 导入排序
+#   UP   pyupgrade（强制新语法 list[int] / X | None）
+#   B    bugbear
+#   SIM  简化
+#   ANN  类型注解（rules.md §2 的硬约束；Ruff 默认不含，必须显式启用）
+#   RUF  Ruff 原生
+#   T20  禁 print（rules.md §8）
+#   S    bandit 安全
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "ANN", "RUF", "T20", "S"]
+
+# 中文项目豁免：RUF001/002/003 检查 docstring/字符串/注释中的「全角标点歧义」
+# （如 ：，（）；），对英文代码库有意义，对中文文档纯属噪音
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[lint.per-file-ignores]
+# 测试中 assert 是预期用法，豁免 S101
+"tests/**" = ["S101"]

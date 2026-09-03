@@ -1,0 +1,22 @@
+# pyproject.toml — 打包元数据 + pytest 配置（lint/format 权威见 ruff.toml）
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "basketball-clip"
+version = "0.1.0"
+description = "篮球视频进球检测与集锦自动剪辑工具"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "huangli" }]
+
+# 骨架阶段无安装包：代码以仓库内脚本形式运行（pythonpath 见 pytest 配置）
+[tool.setuptools]
+py-modules = []
+
+[tool.pytest.ini_options]
+pythonpath = ["scripts"]
+testpaths = ["tests"]
+addopts = "-ra -q"

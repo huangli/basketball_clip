@@ -1,0 +1,13 @@
+# SP-1 spike 依赖清单（basketball-clip 全量依赖的打包验证子集）
+# torch 用 CPU 轮（安装时加 --index-url https://download.pytorch.org/whl/cpu，
+# 避免 PyPI 的 CUDA 捆绑包白白多出 2GB+）
+torch
+ultralytics
+opencv-python
+open_clip_torch
+scikit-learn
+numpy
+pillow
+fastapi
+uvicorn
+pyinstaller
