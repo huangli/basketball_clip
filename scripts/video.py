@@ -61,8 +61,8 @@ PHOTOS_DIR: Path = Path("photos")
 PHOTOS_NAMES: Path = PHOTOS_DIR / "names.json"
 # 自动名单 tag 前缀（半截篮现行白球衣，team_of_tag 白→半截篮；换色改这里）
 NAMES_TAG_PREFIX: str = "白"
-# 聚类段 CLIP 权重首跑下载需走本机代理（AGENTS.md 环境节）
-CLUSTER_HTTPS_PROXY: str = "http://127.0.0.1:7897"
+# 聚类段 CLIP 权重首跑下载需走代理：读此环境变量，未设置则不注入（缺省不走代理）
+PROXY_ENV_NAME: str = "BASKETBALL_CLIP_HTTPS_PROXY"
 # 聚类定稿口径（docs/scorer-cluster/；底层默认 average/0.25 是未标定起点，勿依赖）
 CLUSTER_LINKAGE: str = "complete"
 CLUSTER_THRESHOLD: str = "0.15"
@@ -149,6 +149,12 @@ class Step:
     argv: tuple[str, ...]
     env_extra: dict[str, str] | None = None
     allow_fail: bool = False
+
+
+def _proxy_env_extra() -> dict[str, str] | None:
+    """代理 env 注入：BASKETBALL_CLIP_HTTPS_PROXY 已设则映射为 HTTPS_PROXY，否则不注入。"""
+    proxy: str | None = os.environ.get(PROXY_ENV_NAME)
+    return {"HTTPS_PROXY": proxy} if proxy else None
 
 
 def run_step(cmd: list[str], env_extra: dict[str, str] | None = None) -> None:
@@ -618,7 +624,7 @@ def build_people_steps(
                     "--threshold",
                     CLUSTER_THRESHOLD,
                 ),
-                {"HTTPS_PROXY": CLUSTER_HTTPS_PROXY},
+                _proxy_env_extra(),
             )
         )
     if args.photo_match and not PHOTOS_DIR.is_dir():
@@ -628,7 +634,7 @@ def build_people_steps(
     if photo_enabled:
         # ②.5 允许失败降级（allow_fail）：ERROR 留痕、确认页照出、降级为无预填；
         # 人脸 matcher（T12 换 L1）：无 --cache 参数，face_cache 落 candidates 同目录；
-        # buffalo_l 权重首跑下载同样走本机代理
+        # buffalo_l 权重首跑下载同样需代理（同一 _proxy_env_extra 注入）
         steps.append(
             Step(
                 f"批次{batch.batch}②.5照片匹配",
@@ -642,7 +648,7 @@ def build_people_steps(
                     "--out",
                     str(batch.photo_matches),
                 ),
-                {"HTTPS_PROXY": CLUSTER_HTTPS_PROXY},
+                _proxy_env_extra(),
                 allow_fail=True,
             )
         )
@@ -1206,9 +1212,7 @@ def _cmd_build_auto(
                 CLUSTER_THRESHOLD,
             ]
         )
-        identify_steps.append(
-            Step("自动聚类", tuple(cluster_argv), {"HTTPS_PROXY": CLUSTER_HTTPS_PROXY})
-        )
+        identify_steps.append(Step("自动聚类", tuple(cluster_argv), _proxy_env_extra()))
         # ④ 聚类+颜色分队票源 → auto_roster.json（confirmed=false；team=簇内多数票）
         auto_roster_argv: list[str] = [
             sys.executable,

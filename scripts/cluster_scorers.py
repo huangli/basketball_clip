@@ -10,8 +10,8 @@ Re-ID 后端见 docs/scorer-reid/spec.md §数据契约 cluster_scorers.py --mod
     裁图 md5，双后端共存不串；threshold 不进缓存键，断点续跑/调档不重复推理）。
 依赖：scikit-learn（AgglomerativeClustering）、numpy、PIL、scripts/roster.py、
     scripts/pipe_common.py；编码后端按 --model 二选一：
-    - clip（默认）：open_clip_torch ViT-B-32 / laion2b_s34b_b79k（权重首跑经
-      HTTPS_PROXY=http://127.0.0.1:7897 从 HF 下载）；
+    - clip（默认）：open_clip_torch ViT-B-32 / laion2b_s34b_b79k（权重首跑从 HF
+      下载，需代理时设 BASKETBALL_CLIP_HTTPS_PROXY 环境变量）；
     - osnet_x1_0：torchreid OSNet（行人 Re-ID 专用），权重默认
       models/osnet_x1_0_market1501.pth（--reid-weights 可覆盖；torchreid/torch
       只在构造时 import，测试注入假 encoder 不碰真模型）。
@@ -55,11 +55,14 @@ from roster import validate_roster
 logger = logging.getLogger(__name__)
 
 # ---- 编码后端（--model 取值 → 缓存/落盘 model_tag 对应表，spec §数据契约写死） ----
-# CLIP 后端（spec §Tech Stack；权重 ~350MB 首跑经代理下载，之后本地缓存）
+# CLIP 后端（spec §Tech Stack；权重 ~350MB 首跑从 HF 下载，之后本地缓存；
+# 需代理时设 BASKETBALL_CLIP_HTTPS_PROXY，video.py 会映射注入 HTTPS_PROXY）
 CLIP_MODEL_NAME: str = "ViT-B-32"
 CLIP_PRETRAINED: str = "laion2b_s34b_b79k"
 MODEL_TAG: str = f"{CLIP_MODEL_NAME}/{CLIP_PRETRAINED}"  # CLIP 后端 model_tag（沿用不改）
-HTTPS_PROXY_HINT: str = "HTTPS_PROXY=http://127.0.0.1:7897"  # HF 下载代理（AGENTS.md 环境节）
+PROXY_ENV_NAME: str = (
+    "BASKETBALL_CLIP_HTTPS_PROXY"  # HF 下载代理环境变量名（video.py 同名常量须一致）
+)
 # OSNet Re-ID 后端（torchreid；Market1501 训练权重，rank-1 94.2%）
 OSNET_MODEL_NAME: str = "osnet_x1_0"
 MODEL_TAG_OSNET: str = f"{OSNET_MODEL_NAME}/market1501"
@@ -298,7 +301,7 @@ def build_clip_encoder() -> ImageEncoder:
         ImageEncoder：裁图路径 → embedding 向量（float64 numpy 数组）。
 
     Raises:
-        ExternalApiError: open_clip/torch 未安装，或权重加载失败（含 HTTPS_PROXY
+        ExternalApiError: open_clip/torch 未安装，或权重加载失败（含代理环境变量
             提示，不静默）。
     """
     try:
@@ -314,7 +317,7 @@ def build_clip_encoder() -> ImageEncoder:
     except Exception as exc:
         raise ExternalApiError(
             f"CLIP 权重加载失败（{MODEL_TAG}）: {type(exc).__name__}: {exc}；"
-            f"首次需经代理从 HF 下载（~350MB），请确认 {HTTPS_PROXY_HINT} 已设置后重试，"
+            f"首次需从 HF 下载（~350MB），如需代理请设置 {PROXY_ENV_NAME} 后重试，"
             "或手动放置权重到 HF 缓存目录"
         ) from exc
 
