@@ -17,6 +17,6 @@ authors = [{ name = "huangli" }]
 py-modules = []
 
 [tool.pytest.ini_options]
-pythonpath = ["scripts"]
+pythonpath = ["scripts", "."]
 testpaths = ["tests"]
 addopts = "-ra -q"
