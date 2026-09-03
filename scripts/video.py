@@ -43,6 +43,7 @@ from typing import Any
 from errors import BasketballPipelineError, SchemaError
 from pipe_common import atomic_write_json, configure_logging, new_run_id, read_json
 from roster import format_key, validate_roster
+from team_config import load_team_config
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,7 @@ CURRENT_SESSION_VERSION: int = 1
 PHOTOS_DIR: Path = Path("photos")
 # 号码→姓名全局名单（people ③自动注入 --players；用户维护，gitignore 随 photos/）
 PHOTOS_NAMES: Path = PHOTOS_DIR / "names.json"
-# 自动名单 tag 前缀（半截篮现行白球衣，team_of_tag 白→半截篮；换色改这里）
+# 自动名单 tag 前缀（主队现行白球衣，team_of_tag 白→主队；换色改这里）
 NAMES_TAG_PREFIX: str = "白"
 # 聚类段 CLIP 权重首跑下载需走代理：读此环境变量，未设置则不注入（缺省不走代理）
 PROXY_ENV_NAME: str = "BASKETBALL_CLIP_HTTPS_PROXY"
@@ -74,11 +75,11 @@ RATIO_16_9: float = 16 / 9
 RATIO_4_3: float = 4 / 3
 OUT_16_9: str = "1920x1080"
 OUT_4_3: str = "1440x1080"
-# 4K 档（docs/build-4k/spec.md：半截篮集锦默认 4K + --4k 手动重出）
+# 4K 档（docs/build-4k/spec.md：主队集锦默认 4K + --4k 手动重出）
 OUT4K_16_9: str = "3840x2160"
 OUT4K_4_3: str = "2880x2160"
-# 本队队名（4K 默认档唯一受益队；--4k 对该队为幂等 no-op，spec D1/D3）
-OUR_TEAM: str = "半截篮"
+# 主队队名（4K 默认档唯一受益队）由 team_config.json 会话级注入，
+# 缺失回退 team_config.DEFAULT_TEAM_NAME（build 时按会话目录读取，见 _cmd_build_confirmed）
 # --4k 手动重出的产物名后缀（透传 build_highlight --name-suffix，spec D2）
 FOUR_K_SUFFIX: str = "_4K"
 # 便服队不出分队集锦（build_highlight --team 便服 明文拒收退出 1；--all 展开时跳过）
@@ -526,7 +527,7 @@ def build_crop_argv(
 def load_names_players(path: Path = PHOTOS_NAMES) -> str:
     """读 photos/names.json（号码→姓名）合成 --players 名单串（号码升序）。
 
-    tag = NAMES_TAG_PREFIX+号码（team_of_tag 白→半截篮自动归队，与确认页既有
+    tag = NAMES_TAG_PREFIX+号码（team_of_tag 白→主队自动归队，与确认页既有
     名单惯例一致）；号码归一化 str(int()) 去前导零（同照片库契约）。
 
     Args:
@@ -956,9 +957,11 @@ def _cmd_build_confirmed(
     --all 展开 roster 逐人 + 逐队；多批次合并 goals 后每 filter 只调一次；
     收尾触发热图双风格（自动模式不触发，见 _cmd_build_auto）。
 
-    4K 档（docs/build-4k/spec.md）：半截篮 队伍集锦 默认 4K；--4k 手动重出
-    其余所选产物为 4K；半截篮步骤在 --4k 下为幂等 no-op（原名无后缀）。
+    4K 档（docs/build-4k/spec.md）：主队 队伍集锦 默认 4K；--4k 手动重出
+    其余所选产物为 4K；主队步骤在 --4k 下为幂等 no-op（原名无后缀）。
+    主队名取 work/<场次>/team_config.json（缺失回退 team_config 默认值）。
     """
+    our_team: str = load_team_config(session_dir).team_name
     filters: list[tuple[str, str]]
     if args.all:
         known_keys: set[str] = set()
@@ -1000,13 +1003,13 @@ def _cmd_build_confirmed(
                 base.extend(["--roster", str(roster_path)])
             base.extend(["--rawdir", str(rawdir)])
             for flag, value in filters:
-                # 4K 档：半截篮集锦默认 4K 原名；--4k 时其余步骤 4K+后缀；半截篮 no-op
+                # 4K 档：主队集锦默认 4K 原名；--4k 时其余步骤 4K+后缀；主队 no-op
                 step_out: str = size_hd
                 extra: list[str] = []
-                if flag == "--team" and value == OUR_TEAM:
+                if flag == "--team" and value == our_team:
                     step_out = size_4k
                     if args.four_k:
-                        logger.info("半截篮集锦已默认 4K，--4k 对 %s 为 no-op", OUR_TEAM)
+                        logger.info("主队集锦已默认 4K，--4k 对 %s 为 no-op", our_team)
                 elif args.four_k:
                     step_out = size_4k
                     extra = ["--name-suffix", FOUR_K_SUFFIX]
@@ -1016,7 +1019,7 @@ def _cmd_build_confirmed(
                 title: str = (
                     f"{batch_label} 合成{(' ' + flag + ' ' + value) if flag else '（全员）'}"
                 )
-                if args.four_k or (flag == "--team" and value == OUR_TEAM):
+                if args.four_k or (flag == "--team" and value == our_team):
                     logger.info(
                         "4K 步骤（--out %s，CPU 编码约为 1080p 的 3~4 倍耗时）: %s",
                         step_out,
@@ -1558,7 +1561,7 @@ def _build_parser() -> argparse.ArgumentParser:
     """构建三级 argparse：prog → 子命令 → 各自参数。"""
     ap = argparse.ArgumentParser(
         prog="video",
-        description="半截篮统一入口：score（检测）→ people（认人）→ build（合集）",
+        description="篮球视频统一入口：score（检测）→ people（认人）→ build（合集）",
     )
     sub = ap.add_subparsers(dest="command")
 
@@ -1631,7 +1634,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="four_k",
         action="store_true",
         help="手动重出 4K：所选产物（--scorer/--team/--all 或不带=全员）出 4K 并加 _4K 后缀；"
-        "半截篮集锦本已默认 4K，对该队为 no-op；未认人自动模式忽略",
+        "主队集锦本已默认 4K，对该队为 no-op；未认人自动模式忽略",
     )
     bd.set_defaults(func=_cmd_build)
 

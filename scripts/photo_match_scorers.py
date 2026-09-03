@@ -1,4 +1,4 @@
-"""照片库认人：半截篮队员照片 1:N 识别预填（spec: docs/photo-roster/spec.md §数据契约）。
+"""照片库认人：主队队员照片 1:N 识别预填（spec: docs/photo-roster/spec.md §数据契约）。
 
 ⚠️ 证伪不推荐（2026-08-27，docs/photo-roster/review03.md）：CLIP 整图 embedding
     对同款球衣不同人无身份判别力（跨人对相似度 0.936 超同人对下限、正确/错误
@@ -65,6 +65,7 @@ from cluster_scorers import (
 from errors import BasketballPipelineError, SchemaError
 from pipe_common import atomic_write_json, configure_logging, new_run_id, read_json
 from roster import Roster, format_key, validate_roster
+from team_config import load_team_config
 
 logger = logging.getLogger(__name__)
 
@@ -80,12 +81,13 @@ PHOTO_CACHE_NAME: str = ".photo_cache.json"  # 照片 embedding 缓存（落 --p
 PHOTO_EXTS: frozenset[str] = frozenset({".jpg", ".jpeg", ".png"})  # 合法照片扩展名（小写）
 MIN_PHOTOS_PER_NUMBER: int = 2  # 每号码正反各 1 张起步；不足记 WARNING 不阻塞
 
-TEAM_OURS: str = "半截篮"  # 我方队名（真值映射写死，与 gen_scorer_page.TEAM_WHITE 同值）
+# 我方队名（真值映射用）由 team_config.json 会话级注入，不再硬编码
+# （classify_truth 的 team_name 参数；调用方从 roster.json 所在会话目录读取）
 
 # 真值类别（spec §评估口径）
-TRUTH_OURS: str = "ours_numbered"  # 半截篮有号球（正样本）
+TRUTH_OURS: str = "ours_numbered"  # 主队有号球（正样本）
 TRUTH_NO_NUMBER: str = "no_number"  # 对方/便服 tag 的球（负样本，真值无号）
-TRUTH_UNJUDGEABLE: str = "unjudgeable"  # 半截篮无号 tag 的球（不可判，不进分母）
+TRUTH_UNJUDGEABLE: str = "unjudgeable"  # 主队无号 tag 的球（不可判，不进分母）
 
 _FIRST_DIGITS_RE: re.Pattern[str] = re.compile(r"\d+")  # tag 内首个数字串（真值取号用）
 NO_TOP1_LABEL: str = "(无)"  # 混淆矩阵/报告里 top-1 缺失（并列不采纳或未出分）的展示值
@@ -144,7 +146,7 @@ class EvalReport:
     """--evaluate 评估报告数据。比率为 None 表示分母为 0（待定）。"""
 
     rows: tuple[EvalRow, ...]
-    n_ours: int  # 正样本数（半截篮有号）
+    n_ours: int  # 正样本数（主队有号）
     n_no_number: int  # 负样本数（真值无号）
     n_unjudgeable: int  # 不可判数（不进分母）
     ours_hit: int  # 正样本中过闸且正确的球数
@@ -521,7 +523,7 @@ def number_from_tag(tag: str) -> str | None:
     """真值取号（spec §评估口径写死）：tag 内首个数字串，去零。
 
     Args:
-        tag: roster players 的 tag（如 ``半截篮07`` / ``白色中锋``）。
+        tag: roster players 的 tag（如 ``主队07`` / ``白色中锋``）。
 
     Returns:
         去零号码；tag 内无数字串返回 None（无号 tag）。
@@ -532,15 +534,16 @@ def number_from_tag(tag: str) -> str | None:
     return str(int(m.group()))
 
 
-def classify_truth(roster: Roster) -> dict[str, Truth]:
+def classify_truth(roster: Roster, team_name: str) -> dict[str, Truth]:
     """真值映射（spec §评估口径写死）：assignments 每球归类。
 
-    team=半截篮 的 tag：取号成功 → TRUTH_OURS（正样本）；无号 → TRUTH_UNJUDGEABLE
+    team=team_name 的 tag：取号成功 → TRUTH_OURS（正样本）；无号 → TRUTH_UNJUDGEABLE
     （不可判，不进分母——他可能是照片库成员，正确命中不该计误）。其余 team
     （对方/便服）→ TRUTH_NO_NUMBER（负样本，真值无号）。
 
     Args:
         roster: 校验后的 Roster。
+        team_name: 我方队名（team_config 注入；调用方从会话目录读取）。
 
     Returns:
         assignments 键 → Truth。
@@ -554,7 +557,7 @@ def classify_truth(roster: Roster) -> dict[str, Truth]:
         team: str | None = players.get(tag)
         if team is None:
             raise SchemaError(f"roster.assignments[{key!r}] 引用了 players 中不存在的 tag: {tag!r}")
-        if team != TEAM_OURS:
+        if team != team_name:
             truth[key] = Truth(category=TRUTH_NO_NUMBER, number=None)
             continue
         number: str | None = number_from_tag(tag)
@@ -622,8 +625,8 @@ def evaluate(
 ) -> EvalReport:
     """对照评估（spec §评估口径写死）：top-1 不过闸全量入报告，指标看过闸。
 
-    指标口径：正样本命中率 = 半截篮有号球中「过闸且 top-1 正确」的比例（分母 =
-    半截篮有号球数）；负样本误命中率 = 真值无号球被过闸命中任意号码的比例
+    指标口径：正样本命中率 = 主队有号球中「过闸且 top-1 正确」的比例（分母 =
+    主队有号球数）；负样本误命中率 = 真值无号球被过闸命中任意号码的比例
     （命中即错）；不可判球不进任何分母。混淆矩阵按号码展开，用 top-1（不过闸），
     top-1 缺失（并列/未出分）归入 NO_TOP1_LABEL 列。
 
@@ -702,9 +705,9 @@ def _fmt_float(value: float | None) -> str:
 
 
 _CATEGORY_LABELS: dict[str, str] = {
-    TRUTH_OURS: "半截篮有号",
+    TRUTH_OURS: "主队有号",
     TRUTH_NO_NUMBER: "无号(对方/便服)",
-    TRUTH_UNJUDGEABLE: "不可判(半截篮无号tag)",
+    TRUTH_UNJUDGEABLE: "不可判(主队无号tag)",
 }
 
 
@@ -726,7 +729,7 @@ def render_markdown(report: EvalReport, model_tag: str, threshold: float, margin
         "",
         f"- 模型: `{model_tag}`",
         f"- 采纳闸: score ≥ {threshold} 且 margin ≥ {margin}（占位待 T4 标定）",
-        f"- 入统球: {len(report.rows)}（半截篮有号 {report.n_ours} / "
+        f"- 入统球: {len(report.rows)}（主队有号 {report.n_ours} / "
         f"无号 {report.n_no_number} / 不可判 {report.n_unjudgeable}）",
         "",
         "## 指标",
@@ -769,7 +772,7 @@ def render_markdown(report: EvalReport, model_tag: str, threshold: float, margin
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     """解析 CLI 参数（--evaluate 必须同时给 --roster 与 --goals，缺一报错）。"""
     parser = argparse.ArgumentParser(
-        description="照片库认人：半截篮队员照片 1:N 识别预填（CLIP 后端，零新依赖）"
+        description="照片库认人：主队队员照片 1:N 识别预填（CLIP 后端，零新依赖）"
     )
     parser.add_argument("--photos", required=True, type=Path, help="照片库目录（photos/<号码>/）")
     parser.add_argument(
@@ -817,7 +820,10 @@ def _run_evaluate(args: argparse.Namespace, results: dict[str, TopScore]) -> Non
     roster_data: Any = read_json(args.roster, what="roster.json")
     roster: Roster = validate_roster(roster_data, str(args.roster))
     confirmed: set[str] = load_confirmed_goal_keys(args.goals)
-    truth: dict[str, Truth] = classify_truth(roster)
+    # 我方队名会话级注入：roster.json 落 work/<场次>/，父目录即会话目录（缺失回退默认）
+    truth: dict[str, Truth] = classify_truth(
+        roster, load_team_config(args.roster.resolve().parent).team_name
+    )
     scope: list[str] = sorted(k for k in confirmed if k in truth)
     logger.info(
         "入统 %d 球（goals confirmed %d 键，roster assignments %d 键）",

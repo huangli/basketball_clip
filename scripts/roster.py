@@ -14,8 +14,8 @@ schema 校验、assignments 键格式化、fid 映射、scorer 解析。
 契约要点（写读双方必须共用本模块，禁止各自裸拼，spec M3）：
 - assignments 键 = ``f"{file}#{t:.1f}"``（file 保留全名含 .mp4）；
 - fid = 文件主名（去扩展名），与 extract_frames / mot_candidates 的目录命名一致；
-- 合法 team 值：任意非空 str（"半截篮"/"便服"有特殊语义；对手队名随场次 ID 后缀，
-  见 docs/session-opponent-name/spec.md）。
+- 合法 team 值：任意非空 str（"便服"有特殊语义；我方队名由 team_config.json
+  会话级注入，对手队名随场次 ID 后缀，见 docs/session-opponent-name/spec.md）。
 """
 
 from __future__ import annotations

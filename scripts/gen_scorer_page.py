@@ -27,7 +27,7 @@ validate_roster 可校验），confirmed=true 仅当全部非 SKIP 球已归属�
     --photo-matches（可选 photo_matches.json，必须与 --scorers 同目录，与 --clusters
     校验同构；照片库识别预填——优先级 读号命中 > 照片命中 > 印名匹配 > 空白，
     读号/照片冲突时预填读号、照片候选在条目上出角标（号码+得分）供人工点击切换，
-    名单缺号注入占位条目 半截篮<号码>（team=半截篮 随 players 注入，不靠前缀推队）；
+    名单缺号注入占位条目 <主队名><号码>（team=主队名 随 players 注入，不靠前缀推队）；
     无此参数页面行为与旧版完全一致；spec: docs/photo-roster/spec.md T5）、
     --track-links（可选 track_links.json，必须与 --scorers 同目录，与 --clusters
     校验同口径；轨迹传播预填——条目显示"轨迹#N"，用户逐球归属（非"不算进球"）时
@@ -60,6 +60,7 @@ from typing import TYPE_CHECKING, Any
 from errors import BasketballPipelineError, SchemaError
 from pipe_common import configure_logging, new_run_id, read_json
 from roster import Player, format_key, player_from_dict, validate_roster
+from team_config import DEFAULT_OPPONENT, TeamConfig, load_team_config
 
 if TYPE_CHECKING:
     # 仅类型注解用；运行时延迟 import（photo_match_scorers 链带 numpy/sklearn，
@@ -75,11 +76,11 @@ CLIP_MATCH_MAX_DT_SEC: float = 4.0
 STATUS_OK: str = "OK"
 STATUS_SKIP: str = "SKIP"
 
-TEAM_WHITE: str = "半截篮"  # 白队队名（用户队，固定）
 TEAM_CASUAL: str = "便服"
-# 对手队名不再硬编码：opponent_of(session) 从场次 ID 后缀派生
-# （黑/蓝球衣=对手队；2026-08-09 用户定前缀映射，2026-08-15 队名会话化）
-OPPONENT_FALLBACK: str = "地平线"  # 无后缀老场次（20260722）的历史口径
+# 我方/对手队名不再硬编码：主队名由 team_config.json 会话级注入（main 读
+# work/<场次>/team_config.json，缺失回退 team_config.DEFAULT_TEAM_NAME），
+# 对手名 = 配置 opponent ＞ opponent_of(session) 场次 ID 后缀派生 ＞ 默认兜底
+OPPONENT_FALLBACK: str = DEFAULT_OPPONENT  # 无后缀且未配置 opponent 的兜底
 # 标签前缀 → 阵营（顺序即优先级；蓝色27 归对手系用户 2026-08-09 口径）
 _TEAM_PREFIXES: tuple[tuple[str, str], ...] = (
     ("黑", "opp"),
@@ -194,6 +195,7 @@ const EXPLAYERS = __EXPLAYERS__;
 const CLUSTERS = __CLUSTERS__;
 const SESSION = "__SESSION__";
 const OPP = __OPP__;
+const HOME = __HOME__;
 const LSKEY = "scorer_" + SESSION;
 const POSKEY = LSKEY + "_pos";
 const TOUCHKEY = LSKEY + "_touched";
@@ -445,26 +447,26 @@ function save() {
   localStorage.setItem(PROPKEY, JSON.stringify(propagateAssign));
 }
 function teamOfTag(tag) {
-  // 与 Python 端 team_of_tag 同规则：标签前缀定队，黑/蓝→对手队（OPP），其余便服
+  // 与 Python 端 team_of_tag 同规则：标签前缀定队，黑/蓝→对手队（OPP），白→主队（HOME），其余便服
   if (tag.startsWith("黑") || tag.startsWith("蓝")) return OPP;
-  if (tag.startsWith("白")) return "半截篮";
+  if (tag.startsWith("白")) return HOME;
   return "便服";
 }
 function teamClass(team) {
-  // 队名→CSS 语义类：任意对手队名都能渲染（队名随场次，类名固定）
-  if (team === "半截篮") return "team-home";
+  // 队名→CSS 语义类：任意对手/主队队名都能渲染（队名随场次配置，类名固定）
+  if (team === HOME) return "team-home";
   if (team === "便服") return "team-casual";
   return "team-opp";
 }
 function nDone() { return ITEMS.filter(it => marks[it.key]).length; }
 function renderPlayers() {
-  // 按队分行（对手队 OPP/半截篮/便服），找人不用扫全名单（2026-08-09 用户要求）
+  // 按队分行（对手队 OPP/主队 HOME/便服），找人不用扫全名单（2026-08-09 用户要求）
   const box = document.getElementById("players");
   box.innerHTML = "";
   const vis = visible(); // sel 高亮读可见集当前项（按人核对时 ITEMS[cur] 不是当前球）
   const curKey = vis.length && cur < vis.length ? vis[cur].key : null;
   const numbered = PLAYERS.map((p, idx) => [p, idx]);
-  const KNOWN_TEAMS = [OPP, "半截篮", "便服"];
+  const KNOWN_TEAMS = [OPP, HOME, "便服"];
   for (const tm of KNOWN_TEAMS) {
     const row = numbered.filter(([p]) => p.team === tm);
     // 三行恒渲染（空队也渲染行，否则该队零队员时无处可拖入）
@@ -1017,9 +1019,9 @@ show(start >= 0 ? start : 0);
 
 
 def opponent_of(session: str) -> str:
-    """对手队名 = 场次 ID 第一个 ``_`` 后的后缀（AGENTS.md 约定 YYYYMMDD_对手名）。
+    """对手队名 = 场次 ID 第一个 ``_`` 后的后缀（场次 ID 约定 YYYYMMDD_对手名）。
 
-    无后缀 / 后缀空白 → 回退 OPPONENT_FALLBACK（20260722 等老场次历史口径）。
+    无后缀 / 后缀空白 → 回退 OPPONENT_FALLBACK（通用默认"对手"）。
 
     Args:
         session: 场次 ID，如 ``20260801_对手名``。
@@ -1033,8 +1035,8 @@ def opponent_of(session: str) -> str:
     return OPPONENT_FALLBACK
 
 
-def team_of_tag(tag: str, opp: str) -> str:
-    """按标签前缀推定队别：黑*/蓝*→对手队（opp）、白*→半截篮，其余归便服。
+def team_of_tag(tag: str, opp: str, home: str) -> str:
+    """按标签前缀推定队别：黑*/蓝*→对手队（opp）、白*→主队（home），其余归便服。
 
     页面导出自动补录名单外标签时用同一规则（JS teamOfTag 与本文档同步，
     改规则须两端一起改）。蓝色27 归对手系 2026-08-09 用户口径。
@@ -1042,17 +1044,18 @@ def team_of_tag(tag: str, opp: str) -> str:
     Args:
         tag: 球员标签，如 ``黑21`` / ``白-李四`` / ``灰T恤-A``。
         opp: 对手队名（opponent_of 产物）。
+        home: 主队名（team_config 注入）。
 
     Returns:
-        opp / "半截篮" / "便服"。
+        opp / home / "便服"。
     """
     for prefix, side in _TEAM_PREFIXES:
         if tag.startswith(prefix):
-            return opp if side == "opp" else TEAM_WHITE
+            return opp if side == "opp" else home
     return TEAM_CASUAL
 
 
-def parse_players(spec: str, opp: str) -> list[Player]:
+def parse_players(spec: str, opp: str, home: str) -> list[Player]:
     """解析 --players 名单串："黑21=张三,白-李四=李四" → Player 列表。
 
     每条为 ``tag[=name]``（name 可省，省则为空串）；队别按 team_of_tag 推定。
@@ -1060,6 +1063,7 @@ def parse_players(spec: str, opp: str) -> list[Player]:
     Args:
         spec: 逗号分隔的名单串；空串返回空列表。
         opp: 对手队名（opponent_of 产物，传给 team_of_tag）。
+        home: 主队名（team_config 注入，传给 team_of_tag）。
 
     Returns:
         Player 列表（保持给定顺序）。
@@ -1077,7 +1081,7 @@ def parse_players(spec: str, opp: str) -> list[Player]:
         if not tag:
             raise SchemaError(f"--players 条目缺 tag: {item!r}")
         players.append(
-            Player(tag=tag, name=name.strip() if sep else "", team=team_of_tag(tag, opp))
+            Player(tag=tag, name=name.strip() if sep else "", team=team_of_tag(tag, opp, home))
         )
     return players
 
@@ -1258,22 +1262,23 @@ class PhotoGuess:
 
     number: str  # 去零号码（照片库匹配主键口径）
     score: float  # top-1 余弦得分（冲突角标展示用）
-    tag: str  # 名单球员 tag 或占位 tag（半截篮<号码>）
+    tag: str  # 名单球员 tag 或占位 tag（主队名<号码>）
 
 
 def resolve_photo_guesses(
-    matches: dict[str, MatchEntry], players: list[Player]
+    matches: dict[str, MatchEntry], players: list[Player], home: str
 ) -> tuple[dict[str, PhotoGuess], list[Player]]:
-    """照片命中号码 → 名单 tag；名单缺号 → 占位 Player（半截篮<号>，team=半截篮）。
+    """照片命中号码 → 名单 tag；名单缺号 → 占位 Player（主队名<号>，team=主队名）。
 
     号码查名单复用 match_players_by_number 的数字边界口径（颜色传 None：照片
     识别不给颜色提示）。同号多人 → WARNING 跳过该球不预填（交人裁判，与读号
     歧义同口径）。占位条目随 players 名单注入页面，不得依赖 teamOfTag 前缀推队
-    （``半截篮7`` 不以黑/蓝/白开头，前缀推队会误归便服——spec 写死）。
+    （``主队7`` 不以黑/蓝/白开头，前缀推队会误归便服——spec 写死）。
 
     Args:
         matches: photo_match_scorers.validate_matches_payload 校验产物（key → 命中）。
         players: 本页球员名单（--players/--players-file/已有 roster 合并后）。
+        home: 主队名（team_config 注入；占位 tag 与 team 用它）。
 
     Returns:
         (key → PhotoGuess, 需追加注入名单的占位 Player 列表)；同号码多球只占位一份。
@@ -1287,9 +1292,9 @@ def resolve_photo_guesses(
         if len(found) == 1:
             tag: str = found[0].tag
         elif not found:
-            tag = f"{TEAM_WHITE}{entry.number}"
+            tag = f"{home}{entry.number}"
             if tag not in placeholder_tags and all(p.tag != tag for p in players):
-                placeholders.append(Player(tag=tag, name="", team=TEAM_WHITE))
+                placeholders.append(Player(tag=tag, name="", team=home))
                 placeholder_tags.add(tag)
         else:
             logger.warning(
@@ -1726,6 +1731,7 @@ def build_html(
     existing_assignments: dict[str, str],
     existing_players: dict[str, Player],
     opp: str,
+    home: str,
     clusters: list[dict[str, Any]] | None = None,
 ) -> str:
     """把条目/名单/已有归属/簇数据渲染为自包含确认页 HTML。
@@ -1737,6 +1743,7 @@ def build_html(
         existing_assignments: 已有 roster 的 assignments（页面预填底色）。
         existing_players: 已有 roster 的 tag → Player（自动补录时沿用 name/team）。
         opp: 对手队名（注入 JS ``const OPP``，opponent_of 产物）。
+        home: 主队名（注入 JS ``const HOME``，team_config 产物）。
         clusters: build_page_clusters 产出的簇区数据；None/空列表不渲染簇区
             （无 --clusters 时页面行为与旧版一致）。
 
@@ -1759,6 +1766,7 @@ def build_html(
         .replace("__CLUSTERS__", json.dumps(clusters or [], ensure_ascii=False))
         .replace("__SESSION__", session)
         .replace("__OPP__", json.dumps(opp, ensure_ascii=False))
+        .replace("__HOME__", json.dumps(home, ensure_ascii=False))
     )
 
 
@@ -1830,7 +1838,11 @@ def main(argv: list[str] | None = None) -> int:
         if not session:
             logger.error("缺 --session 且 candidates 无 session 字段")
             return 1
-        opp: str = opponent_of(session)
+        # 会话级队名配置：scorers 固定落 work/<场次>/scorers/，父父级即会话目录；
+        # 缺失/损坏回退默认值（普通用户可完全不配置，team_config 容错口径）
+        cfg: TeamConfig = load_team_config(scorers_path.resolve().parent.parent)
+        home: str = cfg.team_name
+        opp: str = cfg.opponent or opponent_of(session)  # 配置优先，缺省按场次 ID 派生
 
         goals_data: Any = read_json(args.goals, what="goals.json")
         confirmed: list[dict[str, Any]] = _confirmed_goals(goals_data, str(args.goals))
@@ -1854,7 +1866,7 @@ def main(argv: list[str] | None = None) -> int:
         players: list[Player] = (
             load_players_file(args.players_file)
             if args.players_file is not None
-            else parse_players(args.players, opp)
+            else parse_players(args.players, opp, home)
         )
         existing_assignments: dict[str, str] = {}
         existing_players: dict[str, Player] = {}
@@ -1886,7 +1898,7 @@ def main(argv: list[str] | None = None) -> int:
             pm_matches: dict[str, MatchEntry] = validate_matches_payload(
                 pm_data, str(args.photo_matches)
             )
-            photo_guesses, placeholders = resolve_photo_guesses(pm_matches, players)
+            photo_guesses, placeholders = resolve_photo_guesses(pm_matches, players, home)
             if placeholders:
                 # 名单缺号占位条目随 players 注入页面（spec 写死，不靠 teamOfTag 推队）
                 players = [*players, *placeholders]
@@ -1930,6 +1942,7 @@ def main(argv: list[str] | None = None) -> int:
             existing_assignments,
             existing_players,
             opp,
+            home,
             clusters=page_clusters,
         )
         out_path: Path = scorers_path.resolve().parent / "scorer.html"

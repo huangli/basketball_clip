@@ -84,6 +84,7 @@ from photo_match_scorers import (
 )
 from pipe_common import atomic_write_json, configure_logging, new_run_id, read_json
 from roster import Roster, validate_roster
+from team_config import load_team_config
 
 logger = logging.getLogger(__name__)
 
@@ -173,9 +174,9 @@ class EvalReport:
     """--evaluate 评测报告数据。比率为 None 表示分母为 0（待定）。"""
 
     rows: tuple[EvalRow, ...]
-    n_ours: int  # 半截篮有号球数
+    n_ours: int  # 主队有号球数
     n_no_number: int  # 真值无号球数（对方/便服）
-    n_unjudgeable: int  # 不可判球数（半截篮无号 tag）
+    n_unjudgeable: int  # 不可判球数（主队无号 tag）
     n_skipped: int  # 未出分球数（缓存缺失/不在 candidates，WARNING 跳过）
     n_adopted: int  # 机器高置信采纳球数
     n_adopted_judged: int  # 误指认率分母（采纳的有号+无号球；不可判不进）
@@ -909,9 +910,9 @@ def _fmt_float(value: float | None) -> str:
 
 
 _CATEGORY_LABELS: dict[str, str] = {
-    TRUTH_OURS: "半截篮有号",
+    TRUTH_OURS: "主队有号",
     TRUTH_NO_NUMBER: "无号(对方/便服)",
-    TRUTH_UNJUDGEABLE: "不可判(半截篮无号tag)",
+    TRUTH_UNJUDGEABLE: "不可判(主队无号tag)",
 }
 
 
@@ -942,7 +943,7 @@ def render_markdown(report: EvalReport, model_tag: str, threshold: float) -> str
         "",
         f"- 模型: `{model_tag}`",
         f"- 采纳闸: best sim ≥ {threshold}（现 THRESHOLD 单闸；分布见下供阈值定稿）",
-        f"- 入统球: {len(report.rows)}（半截篮有号 {report.n_ours} / "
+        f"- 入统球: {len(report.rows)}（主队有号 {report.n_ours} / "
         f"无号 {report.n_no_number} / 不可判 {report.n_unjudgeable}；"
         f"缓存缺失未出分 {report.n_skipped}）",
         "",
@@ -1000,7 +1001,10 @@ def _run_evaluate(args: argparse.Namespace) -> None:
     roster_data: Any = read_json(args.roster, what="roster.json")
     roster: Roster = validate_roster(roster_data, str(args.roster))
     confirmed: set[str] = load_confirmed_goal_keys(args.goals)
-    truth: dict[str, Truth] = classify_truth(roster)
+    # 我方队名会话级注入：roster.json 落 work/<场次>/，父目录即会话目录（缺失回退默认）
+    truth: dict[str, Truth] = classify_truth(
+        roster, load_team_config(args.roster.resolve().parent).team_name
+    )
     scope: list[str] = sorted(k for k in confirmed if k in truth)
     logger.info(
         "入统 %d 球（goals confirmed %d 键，roster assignments %d 键）",
