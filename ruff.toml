@@ -1,5 +1,5 @@
-# ruff.toml — 唯一 lint/format 权威（详见 rules.md §10）
-# Python 3.14.3 / 半截篮项目
+# ruff 配置：唯一 lint/format 权威
+# 目标 Python 3.10+（打包环境口径）
 
 line-length = 100
 target-version = "py310"
@@ -23,9 +23,9 @@ extend-exclude = [
 #   UP   pyupgrade（强制新语法 list[int] / X | None）
 #   B    bugbear
 #   SIM  简化
-#   ANN  类型注解（rules.md §2 的硬约束；Ruff 默认不含，必须显式启用）
+#   ANN  类型注解（项目硬约束；Ruff 默认不含，必须显式启用）
 #   RUF  Ruff 原生
-#   T20  禁 print（rules.md §8）
+#   T20  禁 print
 #   S    bandit 安全
 select = ["E", "W", "F", "I", "UP", "B", "SIM", "ANN", "RUF", "T20", "S"]
 
