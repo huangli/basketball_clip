@@ -9,20 +9,18 @@ Re-ID 后端见 docs/scorer-reid/spec.md §数据契约 cluster_scorers.py --mod
     embedding 缓存落 <out 同目录>/clip_cache.json（文件名沿用不改，key = model_tag +
     裁图 md5，双后端共存不串；threshold 不进缓存键，断点续跑/调档不重复推理）。
 依赖：scikit-learn（AgglomerativeClustering）、numpy、PIL、scripts/roster.py、
-    scripts/pipe_common.py；编码后端按 --model 二选一：
-    - clip（默认）：open_clip_torch ViT-B-32 / laion2b_s34b_b79k（权重首跑从 HF
-      下载，需代理时设 BASKETBALL_CLIP_HTTPS_PROXY 环境变量）；
-    - osnet_x1_0：torchreid OSNet（行人 Re-ID 专用），权重默认
-      models/osnet_x1_0_market1501.pth（--reid-weights 可覆盖；torchreid/torch
-      只在构造时 import，测试注入假 encoder 不碰真模型）。
+    scripts/pipe_common.py；编码后端 clip（open_clip_torch ViT-B-32 /
+    laion2b_s34b_b79k，权重首跑从 HF 下载，需代理时设
+    BASKETBALL_CLIP_HTTPS_PROXY 环境变量；torch 只在构造时 import，
+    测试注入假 encoder 不碰真模型）。
 典型调用：
     python scripts/cluster_scorers.py \
         --candidates work/20260722/scorers/scorer_candidates.json \
         --candidates work/20260722/scorers_b2/scorer_candidates.json \
         --out work/20260722/scorer_clusters.json
-    # Re-ID 后端 + 纯度自检（只统计 roster assignments 里有的键，打印日志不写文件）：
+    # 纯度自检（只统计 roster assignments 里有的键，打印日志不写文件）：
     python scripts/cluster_scorers.py --candidates ... --out ... \
-        --model osnet_x1_0 --evaluate --roster work/20260722/roster.json
+        --evaluate --roster work/20260722/roster.json
 
 聚类口径（写死，spec §数据契约）：球为聚类单位——一球多图（entry["crops"]，旧数据
 无此字段回退单 entry["crop"]）各提 embedding 取均值、L2 归一化后再聚类；只对
@@ -40,7 +38,7 @@ import sys
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -63,18 +61,8 @@ MODEL_TAG: str = f"{CLIP_MODEL_NAME}/{CLIP_PRETRAINED}"  # CLIP 后端 model_tag
 PROXY_ENV_NAME: str = (
     "BASKETBALL_CLIP_HTTPS_PROXY"  # HF 下载代理环境变量名（video.py 同名常量须一致）
 )
-# OSNet Re-ID 后端（torchreid；Market1501 训练权重，rank-1 94.2%）
-OSNET_MODEL_NAME: str = "osnet_x1_0"
-MODEL_TAG_OSNET: str = f"{OSNET_MODEL_NAME}/market1501"
-OSNET_WEIGHTS_PATH: Path = Path("models/osnet_x1_0_market1501.pth")  # 工作区根相对路径
-OSNET_NUM_CLASSES: int = 751  # Market1501 训练类别数（加载权重用，分类头键不匹配被丢弃）
-OSNET_INPUT_H: int = 256  # OSNet 输入高（人形裁图 2:1）
-OSNET_INPUT_W: int = 128  # OSNet 输入宽
-# ImageNet 归一化常数（torchreid/OSNet 训练口径）
-_IMAGENET_MEAN: tuple[float, float, float] = (0.485, 0.456, 0.406)
-_IMAGENET_STD: tuple[float, float, float] = (0.229, 0.224, 0.225)
-# --model CLI 取值 → model_tag（写死，spec §数据契约）
-MODEL_TAGS: dict[str, str] = {"clip": MODEL_TAG, OSNET_MODEL_NAME: MODEL_TAG_OSNET}
+# --model CLI 取值 → model_tag（写死，spec §数据契约；当前仅 clip 单一后端）
+MODEL_TAGS: dict[str, str] = {"clip": MODEL_TAG}
 
 # ---- 聚类参数（spec §数据契约；阈值拍脑袋起点，--evaluate 实跑后标定） ----
 DEFAULT_THRESHOLD: float = 0.25  # --threshold 默认值（cosine 距离，average linkage）
@@ -285,7 +273,7 @@ def save_clip_cache(path: Path, model_tag: str, cache: dict[str, list[float]]) -
         OSError: IO 重试耗尽（由 atomic_write_json 抛出）。
     """
     payload: dict[str, Any] = {
-        "_meta": {"model": model_tag, "updated_at": datetime.now(UTC).isoformat()},
+        "_meta": {"model": model_tag, "updated_at": datetime.now(timezone.utc).isoformat()},
         "vectors": cache,
     }
     atomic_write_json(path, payload, what="clip_cache.json")
@@ -332,84 +320,21 @@ def build_clip_encoder() -> ImageEncoder:
     return encode
 
 
-def build_osnet_encoder(weights_path: Path = OSNET_WEIGHTS_PATH) -> ImageEncoder:
-    """加载 OSNet Re-ID 模型（torchreid osnet_x1_0 + Market1501 权重）并返回图像编码器。
-
-    torchreid/torch 只在本函数内 import（测试注入假 encoder 不经过这里）。
-    权重直接加载本地 Market1501 文件（pretrained=False，不走 imagenet 预训练；
-    分类头键不匹配被丢弃，属正常）。预处理 = Resize(256×128) + ToTensor +
-    ImageNet 归一化，用 PIL/numpy 手写（不引 torchvision transform，口径等价）。
-
-    Args:
-        weights_path: Market1501 权重 .pth 路径（默认 OSNET_WEIGHTS_PATH，
-            工作区根相对路径，按当前工作目录解析）。
-
-    Returns:
-        ImageEncoder：裁图路径 → 512 维 embedding（float64 numpy 数组，未归一化）。
-
-    Raises:
-        ExternalApiError: 权重文件不存在（含路径提示），或 torchreid/torch 未安装
-            （含 pip 安装提示），或权重加载失败——显式报错，不静默回退 CLIP。
-    """
-    if not weights_path.is_file():
-        raise ExternalApiError(
-            f"OSNet 权重文件不存在: {weights_path}（默认 {OSNET_WEIGHTS_PATH}，"
-            "工作区根相对路径；请确认在仓库根目录运行，或用 --reid-weights 指定实际路径）"
-        )
-    try:
-        import torch
-        import torchreid
-    except ImportError as exc:
-        raise ExternalApiError(
-            f"torchreid/torch 未安装: {exc}；请执行 pip install deep-person-reid（清华镜像）"
-        ) from exc
-    try:
-        model = torchreid.models.build_model(
-            OSNET_MODEL_NAME, num_classes=OSNET_NUM_CLASSES, loss="softmax", pretrained=False
-        )
-        torchreid.utils.load_pretrained_weights(model, str(weights_path))
-        model.eval()
-    except Exception as exc:
-        raise ExternalApiError(
-            f"OSNet 权重加载失败（{MODEL_TAG_OSNET}，{weights_path}）: "
-            f"{type(exc).__name__}: {exc}；请确认权重文件完整（Market1501 版 ~10MB）"
-        ) from exc
-
-    mean = np.asarray(_IMAGENET_MEAN, dtype=np.float64)
-    std = np.asarray(_IMAGENET_STD, dtype=np.float64)
-
-    def encode(path: Path) -> np.ndarray:
-        """单张裁图编码：Resize(256×128) + ImageNet 归一化 → 前向 → 512 维向量。"""
-        with Image.open(path) as im:
-            resized = im.convert("RGB").resize((OSNET_INPUT_W, OSNET_INPUT_H), Image.BILINEAR)
-        arr = np.asarray(resized, dtype=np.float64) / 255.0
-        arr = (arr - mean) / std
-        tensor = torch.from_numpy(np.ascontiguousarray(arr.transpose(2, 0, 1))).unsqueeze(0)
-        with torch.no_grad():
-            feat = model(tensor.float())
-        return np.asarray(feat[0].cpu().numpy(), dtype=np.float64)
-
-    return encode
-
-
-def build_encoder(model: str, reid_weights: Path = OSNET_WEIGHTS_PATH) -> ImageEncoder:
+def build_encoder(model: str) -> ImageEncoder:
     """按 --model 取值分派编码后端（spec §数据契约；查无此模型显式失败，不回退）。
 
     Args:
-        model: --model CLI 取值（MODEL_TAGS 键："clip" / "osnet_x1_0"）。
-        reid_weights: OSNet 权重路径（仅 osnet_x1_0 后端使用）。
+        model: --model CLI 取值（MODEL_TAGS 键，当前仅 "clip"）。
 
     Returns:
         对应后端的 ImageEncoder。
 
     Raises:
         BasketballPipelineError: model 不在 MODEL_TAGS 里（含合法值提示）。
-        ExternalApiError: 后端依赖/权重不可用（见各后端构造函数）。
+        ExternalApiError: 后端依赖/权重不可用（见 build_clip_encoder）。
     """
     if model == "clip":
         return build_clip_encoder()
-    if model == OSNET_MODEL_NAME:
-        return build_osnet_encoder(reid_weights)
     raise BasketballPipelineError(f"查无此编码器后端: {model!r}（合法值: {sorted(MODEL_TAGS)}）")
 
 
@@ -659,9 +584,7 @@ def evaluate_purity(
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     """解析 CLI 参数。"""
-    parser = argparse.ArgumentParser(
-        description="投篮者裁图 embedding 聚类（CLIP / OSNet Re-ID 双后端，--model 切换）"
-    )
+    parser = argparse.ArgumentParser(description="投篮者裁图 embedding 聚类（CLIP 编码后端）")
     parser.add_argument(
         "--candidates",
         required=True,
@@ -672,15 +595,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--out", required=True, type=Path, help="scorer_clusters.json 输出路径")
     parser.add_argument(
         "--model",
-        choices=sorted(MODEL_TAGS),
         default="clip",
-        help="编码后端（默认 %(default)s；osnet_x1_0 = torchreid 行人 Re-ID 专用模型）",
-    )
-    parser.add_argument(
-        "--reid-weights",
-        type=Path,
-        default=OSNET_WEIGHTS_PATH,
-        help="OSNet Market1501 权重路径（默认 %(default)s，仅 --model osnet_x1_0 用）",
+        help="编码后端（默认 %(default)s；当前仅支持 clip）",
     )
     parser.add_argument(
         "--threshold",
@@ -707,6 +623,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error(f"--threshold 须在 (0, {MAX_THRESHOLD}]，实际 {ns.threshold}")
     if ns.evaluate and ns.roster is None:
         parser.error("--evaluate 需配 --roster")
+    if ns.model == "osnet_x1_0":
+        parser.error("osnet 后端已下线，仅支持 clip")
+    if ns.model not in MODEL_TAGS:
+        parser.error(f"--model 非法取值 {ns.model!r}（合法值: {sorted(MODEL_TAGS)}）")
     return ns
 
 
@@ -766,7 +686,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         embeddings, failed = embed_goals(
             goals,
-            lambda: build_encoder(args.model, args.reid_weights),
+            lambda: build_encoder(args.model),
             cache,
             model_tag,
         )
