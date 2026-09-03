@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import re
 import subprocess
 import sys
@@ -93,7 +94,9 @@ class TaskRecord:
         session: 场次 ID，无场次概念的任务为 None。
         argv: 脚本参数（不含 sys.executable，runner 组装完整命令）。
         cwd: 子进程工作目录。
-        total_steps: 进度协议 v1 预计算总步数（>=1）。
+        total_steps: 进度协议 v1 预计算总步数（>=1）；None = 步数事前不可知
+            （如 score/build 链路），进度事件 progress/total_steps 落 None，
+            前端按降级口径转圈 + 日志滚动。
         status: 状态机 pending→running→done/failed/cancelled。
         step_index: 已发出的 step_start 计数（1 起，等于当前步骤序号）。
         returncode: 子进程退出码，未结束为 None；cancel 路径为 -15（POSIX 惯例）。
@@ -106,7 +109,7 @@ class TaskRecord:
     session: str | None
     argv: list[str]
     cwd: Path
-    total_steps: int
+    total_steps: int | None
     status: TaskStatus = "pending"
     step_index: int = 0
     returncode: int | None = None
@@ -159,13 +162,14 @@ class TaskRunner:
         self._procs: dict[str, ProcLike] = {}
         self._cancel_requested: set[str] = set()
         self._last_step: dict[str, str] = {}
+        self._listeners: dict[str, list[queue.Queue[dict[str, object]]]] = {}
         self._lock = threading.Lock()
 
     def submit(
         self,
         kind: str,
         argv: list[str],
-        total_steps: int,
+        total_steps: int | None,
         cwd: Path,
         session: str | None = None,
     ) -> TaskRecord:
@@ -174,7 +178,8 @@ class TaskRunner:
         Args:
             kind: 任务种类标签（如 "score"/"people"/"build"/"photo"）。
             argv: 脚本参数列表，runner 前补 sys.executable 组成完整命令。
-            total_steps: 进度协议 v1 预计算总步数（如 people = 批次数 × 3 段）。
+            total_steps: 进度协议 v1 预计算总步数（如 people = 批次数 × 3 段）；
+                None = 步数事前不可知，进度降级为 None（前端转圈 + 日志滚动）。
             cwd: 子进程工作目录（通常为仓库根）。
             session: 场次 ID，可选。
 
@@ -182,13 +187,13 @@ class TaskRunner:
             已转 running 的 TaskRecord。
 
         Raises:
-            ValueError: argv 为空或 total_steps < 1。
+            ValueError: argv 为空或 total_steps 非 None 且 < 1。
             GuiRunnerError: 子进程启动失败（显式失败不静默）。
         """
         if not argv:
             raise ValueError("argv 不能为空")
-        if total_steps < 1:
-            raise ValueError(f"total_steps 必须 >= 1，收到 {total_steps}")
+        if total_steps is not None and total_steps < 1:
+            raise ValueError(f"total_steps 必须 >= 1 或 None，收到 {total_steps}")
         record = TaskRecord(
             id=uuid.uuid4().hex[:12],
             kind=kind,
@@ -220,7 +225,7 @@ class TaskRunner:
         )
         thread.start()
         logger.info(
-            "任务已提交 id=%s kind=%s session=%s steps=%d", record.id, kind, session, total_steps
+            "任务已提交 id=%s kind=%s session=%s steps=%s", record.id, kind, session, total_steps
         )
         return record
 
@@ -250,6 +255,33 @@ class TaskRunner:
         record = self.get(task_id)
         with self._lock:
             return list(record.events)
+
+    def events_and_subscribe(
+        self, task_id: str
+    ) -> tuple[list[dict[str, object]], queue.Queue[dict[str, object]]]:
+        """原子地取存量事件快照并挂上增量订阅队列（SSE 无缝衔接用）。
+
+        先快照后订阅会有事件从缝隙丢失，故合并为同一把锁内的一个操作；
+        之后产出的每条事件（含调用间隙里产出的）都会 put 进返回的队列。
+
+        Raises:
+            TaskNotFoundError: task_id 不存在。
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            if record is None:
+                raise TaskNotFoundError(f"任务不存在: {task_id}")
+            backlog = list(record.events)
+            q: queue.Queue[dict[str, object]] = queue.Queue()
+            self._listeners.setdefault(task_id, []).append(q)
+        return backlog, q
+
+    def unsubscribe(self, task_id: str, q: queue.Queue[dict[str, object]]) -> None:
+        """摘掉订阅队列（SSE 断连时调用；幂等，已摘除不报错）。"""
+        with self._lock:
+            listeners = self._listeners.get(task_id)
+            if listeners is not None and q in listeners:
+                listeners.remove(q)
 
     def read_events(self, task_id: str) -> list[dict[str, object]]:
         """从落盘 jsonl 整段回放事件（断线重连/重启后恢复用）。
@@ -322,7 +354,8 @@ class TaskRunner:
             step_index = record.step_index
             total = record.total_steps
             self._last_step[task_id] = match.group(1)
-        progress = min(step_index / total, 1.0)
+        # total=None = 步数事前不可知（降级口径）：progress/total_steps 落 None
+        progress = min(step_index / total, 1.0) if total is not None else None
         self._emit(
             task_id,
             "step_start",
@@ -359,6 +392,7 @@ class TaskRunner:
             last_step = self._last_step.get(task_id)
             step_index = record.step_index
             total = record.total_steps
+        progress = min(step_index / total, 1.0) if total is not None else None
         if cancelled:
             self._emit(task_id, "log", {"line": "任务已取消（cancel）"})
             return
@@ -371,7 +405,7 @@ class TaskRunner:
                         "step": last_step,
                         "step_index": step_index,
                         "total_steps": total,
-                        "progress": min(step_index / total, 1.0),
+                        "progress": progress,
                     },
                 )
             self._emit(task_id, "task_done", {"returncode": returncode})
@@ -393,7 +427,7 @@ class TaskRunner:
     # ---- 内部：事件产出（内存 + 落盘） ----
 
     def _emit(self, task_id: str, event_type: EventType, payload: dict[str, object]) -> None:
-        """产出一条事件：进内存队列 + 追加写 jsonl（flush 保证断线可回放）。"""
+        """产出一条事件：进内存队列 + 追加写 jsonl（flush 保证断线可回放）+ 推订阅队列。"""
         event: dict[str, object] = {
             "ts": _utc_now(),
             "task_id": task_id,
@@ -403,7 +437,10 @@ class TaskRunner:
         with self._lock:
             record = self._tasks[task_id]
             record.events.append(event)
+            listeners = list(self._listeners.get(task_id, ()))
             path = self._task_path(task_id)
+        for q in listeners:  # put_nowait 永不阻塞：慢消费者不拖垮读线程
+            q.put_nowait(event)
         try:
             with path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(event, ensure_ascii=False) + "\n")

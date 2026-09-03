@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import queue
 import sys
 import threading
 import time
@@ -255,6 +256,55 @@ def test_persist_and_replay_from_jsonl(tmp_path: pathlib.Path) -> None:
     assert fresh.read_events(record.id) == memory_events
     with pytest.raises(TaskNotFoundError):
         fresh.read_events("不存在的任务")
+
+
+def test_total_steps_none_degraded_progress(tmp_path: pathlib.Path) -> None:
+    """total_steps=None（步数事前不可知）：step 事件进度为 None，任务照常到终态。"""
+    # Arrange
+    runner, _, _ = _make_runner(tmp_path, ["执行: python scripts/a.py\n"])
+    # Act
+    record = runner.submit(
+        kind="score", argv=["scripts/video.py", "score"], total_steps=None, cwd=tmp_path
+    )
+    status = _wait_terminal(runner, record.id)
+    # Assert
+    assert status == "done"
+    starts = [e for e in _events(runner, record.id) if e["type"] == "step_start"]
+    assert len(starts) == 1
+    assert starts[0]["step_index"] == 1
+    assert starts[0]["total_steps"] is None
+    assert starts[0]["progress"] is None
+    with pytest.raises(ValueError):
+        runner.submit(kind="x", argv=["s.py"], total_steps=0, cwd=tmp_path)
+
+
+def test_events_and_subscribe_atomic(tmp_path: pathlib.Path) -> None:
+    """events_and_subscribe：原子返回存量快照 + 订阅队列收增量（SSE 无缝衔接用）。"""
+    # Arrange：行序列先喂一条再挂起，保证订阅发生在首条事件之后
+    runner, _, _ = _make_runner(tmp_path, ["执行: python scripts/a.py\n"], hang=True)
+    record = runner.submit(kind="build", argv=["s.py"], total_steps=1, cwd=tmp_path)
+    deadline = time.monotonic() + 5.0
+    while not _events(runner, record.id) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    # Act
+    backlog, q = runner.events_and_subscribe(record.id)
+    assert backlog == _events(runner, record.id)  # 存量快照
+    runner.cancel(record.id)
+    assert _wait_terminal(runner, record.id) == "cancelled"
+    # Assert：增量事件（取消 log）进队列
+    deadline = time.monotonic() + 5.0
+    got: dict[str, object] | None = None
+    while time.monotonic() < deadline:
+        try:
+            got = q.get(timeout=0.05)
+            break
+        except queue.Empty:
+            continue
+    assert got is not None
+    assert got["task_id"] == record.id
+    runner.unsubscribe(record.id, q)
+    with pytest.raises(TaskNotFoundError):
+        runner.events_and_subscribe("不存在的任务")
 
 
 def test_thread_safety_submit_multiple(tmp_path: pathlib.Path) -> None:
