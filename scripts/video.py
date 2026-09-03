@@ -822,7 +822,7 @@ def _confirmed_keys(goals_path: Path) -> set[str]:
             continue
         try:
             keys.add(format_key(g["file"], g["anchor_time"]))
-        except KeyError, TypeError, ValueError:
+        except (KeyError, TypeError, ValueError):
             # 缺键/类型坏（str anchor_time 走 f"{t:.1f}" 抛 ValueError）都跳过——
             # 结构校验是 build_highlight 的职责，此处只预算命中
             continue

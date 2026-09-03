@@ -354,7 +354,7 @@ def _legit_zero_candidate(fid: str) -> bool:
         return False
     try:
         payload: Any = read_json(cache, what=cache.name)
-    except BasketballPipelineError, OSError:
+    except (BasketballPipelineError, OSError):
         return False
     n_frames: int = len(list((FRAMES_ROOT / fid).glob("f_*.jpg")))
     return isinstance(payload, dict) and payload.get("frames") == n_frames

@@ -477,7 +477,7 @@ def read_number(
             usage_dict: dict[str, Any] = usage_raw if isinstance(usage_raw, dict) else {}
             try:
                 tokens: int = int(usage_dict.get("total_tokens") or 0)
-            except TypeError, ValueError:
+            except (TypeError, ValueError):
                 tokens = 0
             guess: NumberGuess | None = parse_number_answer(raw_text)
             if guess is None:
