@@ -56,7 +56,7 @@ CLIP_FILENAME: str = "open_clip_model.safetensors"
 
 # ---- 文件性检查阈值 ----
 YOLOV8N_MIN_BYTES: int = 3_000_000  # yolov8n.pt 实际 ~6MB
-CLIP_MIN_BYTES: int = 100_000_000  # ViT-B-32 safetensors ~350MB
+CLIP_MIN_BYTES: int = 100_000_000  # ViT-B-32 safetensors 实测 605MB fp32
 FFPROBE_TIMEOUT_S: int = 30
 DOWNLOAD_CHUNK: int = 1 << 20  # 1MB
 DOWNLOAD_TIMEOUT_S: int = 120  # 单次 socket 读超时（非全程）
@@ -245,7 +245,7 @@ def _clip_snapshot_file() -> Path | None:
 
 
 def _trim_blob_duplicates(snapshot: Path) -> None:
-    """snapshot 为实体副本时（Windows 无软链权限）删除同尺寸 blob，省一份 350MB。
+    """snapshot 为实体副本时（Windows 无软链权限）删除同尺寸 blob，省一份 605MB。
 
     HF 离线解析只走 refs + snapshots（try_to_load_from_cache 返回 snapshot 路径），
     blob 仅在 snapshot 是软链时作链接目标需要；实体副本场景 blob 是纯重复。
@@ -280,7 +280,7 @@ def fetch_clip() -> None:
         except ImportError as e:
             raise AssetError(f"huggingface_hub 未安装（用 .venv-spike 运行）: {e}") from e
         CLIP_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        logger.info("CLIP 权重下载中（~350MB）: %s/%s", CLIP_REPO_ID, CLIP_FILENAME)
+        logger.info("CLIP 权重下载中（~605MB）: %s/%s", CLIP_REPO_ID, CLIP_FILENAME)
         try:
             hf_hub_download(
                 repo_id=CLIP_REPO_ID, filename=CLIP_FILENAME, cache_dir=str(CLIP_CACHE_DIR)

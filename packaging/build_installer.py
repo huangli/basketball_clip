@@ -1,11 +1,16 @@
-"""一键打包（E-1 范围：资产齐备 → PyInstaller → exe 同级补料 → 冒烟；Inno 段属 E-2）。
+"""一键打包：资产齐备 → PyInstaller → exe 同级补料 → 冒烟 → Inno 编译安装器。
 
-输入：packaging/assets/（缺失自动调 fetch_assets.py 幂等补齐）、仓库源码。
-输出：``dist/basketball-clip/`` one-folder 包 + ``packaging/build.log`` 全程日志。
+输入：packaging/assets/（缺失自动调 fetch_assets.py 幂等补齐）、仓库源码；
+    Inno 段需本机已装 Inno Setup 6（ISCC.exe，PATH 或常见安装路径自动探测，
+    也可用环境变量 ``ISCC`` 显式指定）。
+输出：``dist/basketball-clip/`` one-folder 包 + ``packaging/dist/`` 下
+    ``basketball-clip-setup-<version>.exe`` 安装器 + ``packaging/build.log``
+    全程日志（Inno 段同日志追加记录）。
 依赖：打包 venv（.venv-spike：Python 3.10 + PyInstaller 6.22）；仅标准库 + PyInstaller。
 典型调用（cwd 任意，脚本自带仓库根定位）::
 
-    .venv-spike/Scripts/python.exe packaging/build_installer.py
+    .venv-spike/Scripts/python.exe packaging/build_installer.py              # 全链含安装器
+    .venv-spike/Scripts/python.exe packaging/build_installer.py --pack-only  # 只出 one-folder 包
 
 产物布局契约（gui/frozen.py 的只读方）::
 
@@ -20,6 +25,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -31,6 +38,8 @@ logger = logging.getLogger("build_installer")
 REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 PACKAGING_DIR: Path = REPO_ROOT / "packaging"
 SPEC_PATH: Path = PACKAGING_DIR / "basketball-clip.spec"
+ISS_PATH: Path = PACKAGING_DIR / "installer.iss"
+INSTALLER_DIR: Path = PACKAGING_DIR / "dist"  # 安装器产物（与 iss 内 OutputDir 一致）
 FETCH_SCRIPT: Path = PACKAGING_DIR / "fetch_assets.py"
 BUILD_LOG: Path = PACKAGING_DIR / "build.log"
 DIST_DIR: Path = REPO_ROOT / "dist"
@@ -38,9 +47,16 @@ BUILD_DIR: Path = REPO_ROOT / "build"
 APP_NAME: str = "basketball-clip"
 
 PYINSTALLER_TIMEOUT_S: int = 3600  # 全量打包实测 3-5 分钟，给足余量
+INNO_TIMEOUT_S: int = 14400  # 1.8GB lzma2/ultra64 压缩实测可达数十分钟，给 4 小时余量
 SMOKE_TIMEOUT_S: int = 600  # exe 首次启动 torch import 较慢
 # scripts/ 拷贝排除：字节码缓存不进包
 COPY_IGNORE: tuple[str, ...] = ("__pycache__", "*.pyc")
+# Inno 编译器探测路径（用户级安装 + 两台机器级常见路径；PATH 优先）
+_ISCC_CANDIDATES: tuple[str, ...] = (
+    r"%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe",
+    r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+    r"C:\Program Files\Inno Setup 6\ISCC.exe",
+)
 
 
 class BuildError(Exception):
@@ -192,11 +208,81 @@ def report_size(app_dir: Path) -> None:
     )
 
 
+def read_version() -> str:
+    """从 pyproject.toml 解析 ``version = "x.y.z"``（Python 3.10 无 tomllib，用正则）。
+
+    Raises:
+        BuildError: 文件缺失或未匹配到版本字段。
+    """
+    pyproject = REPO_ROOT / "pyproject.toml"
+    if not pyproject.is_file():
+        raise BuildError(f"pyproject.toml 缺失: {pyproject}")
+    match = re.search(r'(?m)^version\s*=\s*"([^"]+)"', pyproject.read_text(encoding="utf-8"))
+    if match is None:
+        raise BuildError(f"pyproject.toml 中未找到 version 字段: {pyproject}")
+    return match.group(1)
+
+
+def find_iscc() -> Path:
+    """定位 Inno 编译器：环境变量 ISCC > PATH > 常见安装路径。
+
+    Raises:
+        BuildError: 全部未命中（提示 winget 安装）。
+    """
+    env = os.environ.get("ISCC")
+    if env and Path(env).is_file():
+        return Path(env)
+    on_path = shutil.which("ISCC") or shutil.which("iscc")
+    if on_path:
+        return Path(on_path)
+    for pattern in _ISCC_CANDIDATES:
+        candidate = Path(os.path.expandvars(pattern))
+        if candidate.is_file():
+            return candidate
+    raise BuildError(
+        "未找到 ISCC.exe（winget install JRSoftware.InnoSetup，或设环境变量 ISCC 指向）"
+    )
+
+
+def run_inno(app_dir: Path) -> Path:
+    """Inno 编译安装器 → packaging/dist/basketball-clip-setup-<version>.exe。
+
+    Raises:
+        BuildError: one-folder 包/iss/图标缺失，或编译失败，或产物未出现。
+    """
+    if not (app_dir / f"{APP_NAME}.exe").is_file():
+        raise BuildError(f"Inno 源包缺失（先跑打包段）: {app_dir}")
+    for required in (ISS_PATH, PACKAGING_DIR / "icon.ico", PACKAGING_DIR / "INSTALLER_LICENSE.txt"):
+        if not required.is_file():
+            raise BuildError(f"Inno 编译输入缺失: {required}")
+    version = read_version()
+    iscc = find_iscc()
+    INSTALLER_DIR.mkdir(parents=True, exist_ok=True)
+    _run_logged(
+        [
+            str(iscc),
+            f"/DAppVersion={version}",
+            f"/DSourceDir={app_dir}",
+            f"/O{INSTALLER_DIR}",
+            str(ISS_PATH),
+        ],
+        cwd=PACKAGING_DIR,
+        timeout=INNO_TIMEOUT_S,
+        what="inno",
+    )
+    setup_exe = INSTALLER_DIR / f"{APP_NAME}-setup-{version}.exe"
+    if not setup_exe.is_file():
+        raise BuildError(f"Inno 编译成功但产物缺失: {setup_exe}")
+    logger.info("安装器产物: %s（%.0f MB）", setup_exe, setup_exe.stat().st_size / 1e6)
+    return setup_exe
+
+
 def main(argv: list[str] | None = None) -> int:
     """打包入口。返回退出码（0=成功，1=失败，2=参数错误）。"""
     args = argv if argv is not None else sys.argv[1:]
-    if args:
-        print("用法: python packaging/build_installer.py（Inno 安装器段属 E-2，未实现）")  # noqa: T201
+    pack_only = args == ["--pack-only"]
+    if args and not pack_only:
+        print("用法: python packaging/build_installer.py [--pack-only]")  # noqa: T201
         return 2
     _configure_logging()
     started = time.monotonic()
@@ -207,6 +293,8 @@ def main(argv: list[str] | None = None) -> int:
         stage_runtime_files(app_dir)
         smoke_test(app_dir)
         report_size(app_dir)
+        if not pack_only:
+            run_inno(app_dir)
     except BuildError as e:
         logger.error("打包失败: %s", e)
         return 1

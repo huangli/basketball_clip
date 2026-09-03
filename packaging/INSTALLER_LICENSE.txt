@@ -1,0 +1,40 @@
+﻿basketball-clip 许可声明
+========================
+
+一、本项目主代码（MIT License）
+
+Copyright (c) 2026 huangli
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+二、第三方组件许可汇总
+
+1. ultralytics（YOLO 推理框架）及 yolov8n.pt 权重：AGPL-3.0
+   https://github.com/ultralytics/ultralytics/blob/main/LICENSE
+   本项目以"按原样调用其公开接口"的方式使用并显式声明该依赖；
+   如需商用或闭源分发，请自行评估 AGPL 义务或购买 Ultralytics 企业许可。
+
+2. ffmpeg / ffprobe：本安装包内嵌 BtbN FFmpeg 构建（LGPL 版本）。
+   https://github.com/BtbN/FFmpeg-Builds
+   许可文本随安装附带于安装目录 _internal\assets\ffmpeg\ 下。
+
+3. CLIP 权重（open_clip ViT-B-32 / laion2b_s34b_b79k）：随包附带，
+   源自 Hugging Face laion/CLIP-ViT-B-32-laion2B-s34B-b79K。
+
+点击"我接受"即表示你已阅读并理解上述许可条款。
