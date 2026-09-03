@@ -79,9 +79,14 @@ function toast(message, kind) {
 }
 
 // ---- API 封装：4xx/5xx 一律抛中文错误，调用方 catch 后 toast ----
+// 网络层错误（服务不可达、fetch 自身 reject）也统一为中文提示，不透出浏览器英文报错。
 
 function api(path, options) {
-  return fetch(path, options).then(function (res) {
+  return fetch(path, options)
+    .catch(function () {
+      throw new Error("无法连接后端服务，请确认程序正在运行");
+    })
+    .then(function (res) {
     if (res.ok) return res.json();
     return res
       .json()
@@ -234,7 +239,7 @@ function buildTaskPanel(container) {
   var track = el("div", "progress-track indeterminate");
   var bar = el("div", "progress-bar");
   track.appendChild(bar);
-  var logBox = el("pre", "log-box");
+  var logBox = el("div", "log-box");
   var cancelBtn = el("button", "btn btn-danger", "取消任务");
   panel.appendChild(statusLine);
   panel.appendChild(track);
@@ -244,8 +249,53 @@ function buildTaskPanel(container) {
   return { panel: panel, statusLine: statusLine, track: track, bar: bar, logBox: logBox, cancelBtn: cancelBtn };
 }
 
+var LOG_MAX_LINES = 2000; // 日志区保留上限：超出从顶部修剪，防 O(n²) 渲染卡死
+
+// 日志追加：行先入待写队列，requestAnimationFrame 批量刷 DOM（合并一帧内的高频日志）；
+// 超出 LOG_MAX_LINES 从顶部修剪，首次修剪插入「已折叠更早日志」提示行。
 function appendLog(logBox, line) {
-  logBox.textContent += line + "\n";
+  if (!logBox._pending) logBox._pending = [];
+  logBox._pending.push(line);
+  if (logBox._flushScheduled) return;
+  logBox._flushScheduled = true;
+  requestAnimationFrame(function () {
+    logBox._flushScheduled = false;
+    flushLog(logBox);
+  });
+}
+
+function flushLog(logBox) {
+  var pending = logBox._pending;
+  if (!pending || !pending.length) return;
+  logBox._pending = [];
+  var frag = document.createDocumentFragment();
+  for (var i = 0; i < pending.length; i++) {
+    frag.appendChild(el("div", "log-line", pending[i]));
+  }
+  logBox.appendChild(frag);
+  logBox._count = (logBox._count || 0) + pending.length;
+  while (logBox._count > LOG_MAX_LINES) {
+    var first = logBox.firstChild;
+    if (!first) break;
+    if (first.classList && first.classList.contains("log-trim-notice")) {
+      // 提示行永远钉在顶部，删它的下一行
+      var victim = first.nextSibling;
+      if (!victim) break;
+      logBox.removeChild(victim);
+    } else {
+      logBox.removeChild(first);
+      if (!logBox._trimNoticeShown) {
+        var notice = el(
+          "div",
+          "log-line log-trim-notice",
+          "…已折叠更早日志（仅保留最近 " + LOG_MAX_LINES + " 行）…"
+        );
+        logBox.insertBefore(notice, logBox.firstChild);
+        logBox._trimNoticeShown = true;
+      }
+    }
+    logBox._count -= 1;
+  }
   logBox.scrollTop = logBox.scrollHeight;
 }
 
@@ -941,9 +991,6 @@ function initDiagnostics() {
     .catch(function () {
       /* 探测失败保持置灰 */
     });
-  btn.addEventListener("click", function () {
-    if (btn.disabled) toast("诊断日志导出将在下一任务（D-1）落地后可用");
-  });
 }
 
 // ---- 启动 ----
