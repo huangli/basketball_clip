@@ -463,7 +463,7 @@ def adaptive_crop(
 def load_hoops(path: str) -> dict[str, list[dict[str, Any]]]:
     """读 hoops.json 并按 fid 分组事件；空路径/缺失/损坏返回空 dict（回退锚点裁剪）。
 
-    与 vlm_filter.load_hoops 同构（此处复制以免把 torch 依赖拖进审核视频生成）。
+    与旧检测链的 load_hoops 同构（此处复制以免把 torch 依赖拖进审核视频生成）。
 
     Args:
         path: hoops.json 路径；空串表示未提供。

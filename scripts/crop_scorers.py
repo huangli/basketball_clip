@@ -26,7 +26,8 @@ t0/cx/cy，goals 锚点与其 dt=0 匹配）最近的轨迹 = 进球轨迹；沿
 整轨无持球点 → 取轨迹起点时刻的最近人框；轨迹不存在/端点离锚点太远 → SKIP。
 SKIP 球无投篮者定位但仍切预览片段（用户凭视频手选）。
 号码识别（--read-numbers，2026-08-09 升级多帧投票，scorer-reid spec §数据契约）：
-对每张 crops 逐张调 K3 读背号（复用 vlm_filter 的 load_token/crop_to_b64/重试口径），
+对每张 crops 逐张调 K3 读背号（复用 vlm_client 的 load_token/crop_to_b64/重试口径，
+延迟导入、默认关闭），
 多帧众数投票压单帧误读；number_cache.json 键 = 裁图文件 md5（旧 goal key 自动迁移
 重键、旧键保留一轮由人清理），幂等不重复扣额度；--numbers-cache-only 跳票模式
 零新调用（旧数据重跑回填用）。
@@ -56,7 +57,7 @@ import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -76,22 +77,6 @@ from pipe_common import (
     run_ffmpeg,
 )
 from roster import fid_of, format_key
-from vlm_filter import (
-    API_URL as K3_API_URL,
-)
-from vlm_filter import (
-    HTTP_RETRY as K3_HTTP_RETRY,
-)
-from vlm_filter import (
-    HTTP_TIMEOUT_SEC as K3_HTTP_TIMEOUT_SEC,
-)
-from vlm_filter import (
-    MODEL as K3_MODEL,
-)
-from vlm_filter import (
-    crop_to_b64,
-    load_token,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +134,7 @@ TH_SAT: int = 70  # 白队的饱和度上限（彩色亮部/肤色不归白）
 MIN_BLACK_FRACTION: float = 0.25  # 黑色像素占比下限，不足（含近阈混杂）归"便服"
 MIN_WHITE_FRACTION: float = 0.20  # 白色像素占比下限，不足（含近阈混杂）归"便服"
 
-# ---- 号码识别参数（--read-numbers，spec T7；K3 读裁图背号，走订阅额度无需 key） ----
+# ---- 号码识别参数（--read-numbers，spec T7；K3 读裁图背号，凭证走环境变量，见 vlm_client） ----
 NUMBER_PROMPT_VERSION: str = "number-v1"  # prompt 语义变更即升版本，旧缓存作废（幂等可追溯）
 MAX_NUMBER_READS_PER_RUN: int = 20  # spec：单次运行新调用 >20 次须先问用户（缓存命中不计）
 NUMBER_PROMPT: str = (
@@ -398,11 +383,13 @@ def save_number_cache(path: Path, results: dict[str, dict[str, Any]]) -> None:
     Raises:
         OSError: IO 重试耗尽（由 atomic_write_json 抛出）。
     """
+    from vlm_client import MODEL as K3_MODEL  # 延迟导入：仅读号路径依赖 vlm_client
+
     payload: dict[str, Any] = {
         "_meta": {
             "prompt_version": NUMBER_PROMPT_VERSION,
             "model": K3_MODEL,
-            "updated_at": datetime.now(UTC).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         },
         "results": results,
     }
@@ -420,11 +407,11 @@ def read_number(
     crop_path: Path,
     key: str,
 ) -> tuple[NumberGuess | None, int, str]:
-    """对单张裁图调 K3 号码识别（重试口径同 vlm_filter.ask_vlm：网络错误重试、
+    """对单张裁图调 K3 号码识别（重试口径同 vlm_client：网络错误重试、
     401 等待后强制重载 token 重试、400/403 不重试）。
 
-    图片输入规格沿用 vlm_filter：crop_to_b64（IMG_SIZE=840 缩放 + base64 JPEG
-    data URI）；token 走 vlm_filter.load_token（OAuth 900s 临期自动重读）。
+    图片输入规格沿用 vlm_client：crop_to_b64（IMG_SIZE=840 缩放 + base64 JPEG
+    data URI）；token 走 vlm_client.load_token（环境变量凭证，每次直读）。
 
     Args:
         client: httpx 客户端（trust_env=False，直连不走代理）。
@@ -435,6 +422,24 @@ def read_number(
         (NumberGuess, total_tokens, 错误摘要)；成功 err=""；失败 guess=None
         不炸整批（调用方记日志继续，失败不写缓存、下次重跑重试）。
     """
+    # 延迟导入：仅 --read-numbers 执行路径依赖 vlm_client，模块顶层不引入
+    from vlm_client import (
+        API_URL as K3_API_URL,
+    )
+    from vlm_client import (
+        HTTP_RETRY as K3_HTTP_RETRY,
+    )
+    from vlm_client import (
+        HTTP_TIMEOUT_SEC as K3_HTTP_TIMEOUT_SEC,
+    )
+    from vlm_client import (
+        MODEL as K3_MODEL,
+    )
+    from vlm_client import (
+        crop_to_b64,
+        load_token,
+    )
+
     try:
         with Image.open(crop_path) as im:
             img_b64: str = crop_to_b64(im.convert("RGB"))
@@ -569,6 +574,14 @@ def apply_number_reading(
     actual_reader: NumberReader | None = reader
     http_client: httpx.Client | None = None
     if not cache_only:
+        # 延迟导入：仅 --read-numbers 全量模式依赖 vlm_client（跳票模式零新调用、零凭证要求）
+        from vlm_client import (
+            MODEL as K3_MODEL,
+        )
+        from vlm_client import (
+            load_token,
+        )
+
         planned: set[str] = {
             md5 for _e, items in plans for _n, md5 in items if md5 is not None and md5 not in cache
         }
@@ -581,7 +594,7 @@ def apply_number_reading(
             try:
                 load_token()  # 凭证预检：缺凭证尽早显式失败
             except RuntimeError as exc:
-                raise ExternalApiError(f"K3 凭证不可用: {exc}") from exc
+                raise ExternalApiError(str(exc)) from exc
             http_client = httpx.Client(trust_env=False)  # trust_env=False：直连，不走代理
 
             def actual_reader(crop_path: Path, key: str) -> tuple[NumberGuess | None, int, str]:
@@ -627,7 +640,7 @@ def apply_number_reading(
                     **asdict(guess),
                     "usage": {"total_tokens": tokens},
                     "model": K3_MODEL,
-                    "ts": datetime.now(UTC).isoformat(),
+                    "ts": datetime.now(timezone.utc).isoformat(),
                 }
                 save_number_cache(cache_path, cache)
                 logger.info(
