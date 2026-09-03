@@ -630,7 +630,7 @@ function renderTeamStep(container) {
       el("div", "notice info", "当前已配置：队名「" + existing.team_name + "」" + (existing.opponent ? "，对手「" + existing.opponent + "」" : ""))
     );
   }
-  var teamInput = textInput(existing ? existing.team_name : "", "如：半截篮");
+  var teamInput = textInput(existing ? existing.team_name : "", "如：飞鹰队");
   var oppInput = textInput(existing && existing.opponent ? existing.opponent : "", "如：老对手（可留空）");
   addField(container, "队名（必填）", teamInput);
   addField(container, "对手名（可选）", oppInput);

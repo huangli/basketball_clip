@@ -100,9 +100,12 @@ python scripts/video.py clean --dry-run
 ### 开发与测试
 
 ```powershell
-ruff format scripts tests && ruff check --fix scripts tests
-pytest -q
+python -m ruff format scripts tests gui
+python -m ruff check --fix scripts tests gui
+python -m pytest -q
 ```
+
+`ruff` / `pytest` 装了命令行入口的话，裸命令（`ruff …`、`pytest -q`）与 `python -m …` 等价，用哪个都行；`ruff check --fix` 自动修复后须人工复核 diff。
 
 代码规范见 [rules.md](rules.md)（鲁棒优先 > 性能 > 简洁）。
 

@@ -28,7 +28,7 @@ pip install ruff
 
 ## 开发流程
 
-1. Fork 本仓库，从默认分支 `master` 切出功能分支（如 `fix/build-crash`、`feat/new-metric`）。
+1. Fork 本仓库，从默认分支 `main` 切出功能分支（如 `fix/build-crash`、`feat/new-metric`）。
 2. 改代码，补测试（新增/改动逻辑必须有 pytest 用例锁定，见 [rules.md](rules.md) §9）。
 3. 提交前跑本地关口，必须**全绿**：
 
@@ -41,7 +41,7 @@ pip install ruff
    - `ruff` 装了命令行入口的话，`ruff ...` 与 `python -m ruff ...` 等价，用哪个都行。
    - `ruff check --fix` 自动修复后**必须人工复核 diff**，勿盲信。
    - 测试也可用 `pytest -q`（环境里有 pytest 命令行入口时）。
-4. 推到自己 fork，向 `master` 发 PR。PR 描述写清楚：改了什么、为什么、本地关口结果。
+4. 推到自己 fork，向 `main` 发 PR。PR 描述写清楚：改了什么、为什么、本地关口结果。
 
 ## 代码规范
 
