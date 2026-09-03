@@ -1449,14 +1449,21 @@ def _fmt_gb(n: int) -> str:
 
 def _rmtree_force(path: Path) -> None:
     """删目录树，容忍只读文件（git pack / 检出物在 Windows 上带只读位，
-    直接 rmtree 会 WinError 5）：onexc 回调去掉只读位后重试同一操作。
+    直接 rmtree 会 WinError 5）：onexc/onerror 回调去掉只读位后重试同一操作。
     """
 
     def _onexc(func: Callable[[str], object], p: str, exc: BaseException) -> None:
         os.chmod(p, stat.S_IWRITE)
         func(p)
 
-    shutil.rmtree(path, onexc=_onexc)
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_onexc)
+    else:
+        # 3.10/3.11 无 onexc 关键字；onerror 回调第三参为 sys.exc_info() 元组，此处不用
+        shutil.rmtree(
+            path,
+            onerror=lambda func, p, _exc_info: _onexc(func, p, _exc_info[1]),
+        )
 
 
 def _collect_srcdir_targets() -> list[Path]:
