@@ -1,0 +1,83 @@
+name: Bug 反馈
+description: 报告使用 basketball-clip 时遇到的问题
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！请尽量按下面的项填全，信息越完整定位越快。
+        **Issues 是唯一反馈渠道**，问题排查以诊断日志和小样片为准。
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 发生了什么？用一两句话概括。
+      placeholder: 例如：检测到一半卡住不动，进度条停在 37%
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 操作步骤
+      description: 你走到了向导的哪一步（选素材目录 / 设置队名 / 检测进球 / 网页标注 / 认人 / 生成合集 / 照片精选）？做了哪些操作后出现问题？如果是命令行使用，请贴出完整命令。
+      placeholder: |
+        1. 打开 GUI，选择素材目录 D:\videos\20260901
+        2. 点击"开始检测"
+        3. 跑到第 3 个文件时报错……
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+      description: 你本以为会发生什么？
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 实际发生了什么？如有报错，请把报错原文贴上来。
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Windows 版本
+      description: 设置 → 系统 → 关于 → Windows 规格 中的"版本"
+      options:
+        - Windows 11
+        - Windows 10
+        - 其他（请在问题描述中注明）
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 软件版本
+      description: 安装包版本号或 git commit 哈希（开发方式使用时）
+      placeholder: 例如 0.1.0
+    validations:
+      required: false
+  - type: markdown
+    attributes:
+      value: |
+        ### 请附上诊断日志
+        1. 在 GUI **顶栏**点击 **"导出诊断日志"** 按钮，会下载一个 `basketball-clip-diagnostics-*.zip`；
+        2. **导出前可先解开 zip 自查一遍，确认没有你不想公开的内容再上传**；
+        3. 把 zip 直接拖进本 issue 的编辑框即可上传。
+
+        诊断 zip 只含版本号、系统信息、任务事件流与配置快照，**不含视频素材，密钥/令牌只记录"已设置/未设置"不落值**。
+
+        ### 关于视频素材
+        **请勿上传私人视频素材。** 如问题与特定视频有关，请截取一小段能复现问题的样片（几秒即可）并确认可公开后再提供；排查以小样片为准。
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已导出诊断日志并自查过 zip 内容，已附在本 issue 中（或说明无法导出的原因）
+          required: true
+        - label: 我确认本 issue 不含私人视频素材与任何不想公开的信息
+          required: true

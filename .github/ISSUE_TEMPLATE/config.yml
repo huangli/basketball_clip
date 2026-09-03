@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 问题反馈与讨论
+    url: https://github.com/huangli/basketball-clip/issues
+    about: Issues 是唯一反馈渠道——报 bug 请用 Bug 反馈模板，其他问题也在这里开 issue 讨论。
