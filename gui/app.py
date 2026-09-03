@@ -26,15 +26,17 @@ import os
 import queue
 import re
 from collections.abc import Iterator
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from gui.diagnostics import build_diagnostics_zip
 from gui.runner import (
     TERMINAL_STATUSES,
     GuiRunnerError,
@@ -406,6 +408,31 @@ def create_app(
     def health() -> dict[str, bool]:
         """健康检查。"""
         return {"ok": True}
+
+    # ---- 诊断日志导出（D-1：一键打 zip 供用户附到 GitHub issue） ----
+
+    # 前端 HEAD 探测激活按钮；FastAPI GET 路由不自动响应 HEAD（starlette 1.6 实证
+    # HEAD→405 Allow:GET），必须显式并列 HEAD
+    @app.api_route("/api/diagnostics", methods=["GET", "HEAD"])
+    def download_diagnostics() -> Response:
+        """导出诊断日志 zip：版本/环境/任务事件流/配置快照（密钥零泄漏）。
+
+        前端 HEAD 探测激活按钮（GET/HEAD 并列注册），
+        下载走 ``window.location.href``（附件 Content-Disposition）。
+        """
+        try:
+            payload = build_diagnostics_zip(work_dir=work, repo_root=REPO_ROOT)
+        except OSError as e:
+            logger.error("诊断日志生成失败: %s", e, exc_info=True)
+            _fail(500, "诊断日志生成失败，请查看后端日志")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        filename = f"basketball-clip-diagnostics-{stamp}.zip"
+        logger.info("诊断日志已导出: %s（%d 字节）", filename, len(payload))
+        return Response(
+            content=payload,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     @app.post("/api/sessions/scan")
     def scan_sessions(body: ScanRequest) -> dict[str, Any]:
