@@ -36,7 +36,7 @@ import logging
 import math
 import random
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -1339,7 +1339,7 @@ def heat_session(
 
     report: dict[str, Any] = {
         "session": session_dir.name,
-        "generated_at": datetime.now(UTC).isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "params": {
             "release_before_sec": RELEASE_BEFORE_SEC,
             "held_search_before_sec": HELD_SEARCH_BEFORE_SEC,

@@ -20,7 +20,7 @@ from __future__ import annotations
 import argparse
 import logging
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -220,7 +220,7 @@ def land_session(session_dir: Path, detect_dir: Path, out_path: Path) -> dict[st
     ratio: float = usable / total if total else 0.0
     report: dict[str, Any] = {
         "session": session_dir.name,
-        "generated_at": datetime.now(UTC).isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "params": {"q2_min_usable_ratio": Q2_MIN_USABLE_RATIO},
         "summary": {
             "total": total,

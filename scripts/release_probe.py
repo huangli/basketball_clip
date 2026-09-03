@@ -24,7 +24,7 @@ import argparse
 import logging
 import math
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -505,7 +505,7 @@ def probe_session(
 
     report: dict[str, Any] = {
         "session": session_dir.name,
-        "generated_at": datetime.now(UTC).isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "params": {
             "window_before_sec": [WINDOW_MIN_BEFORE_SEC, WINDOW_MAX_BEFORE_SEC],
             "seg_max_gap_frames": SEG_MAX_GAP_FRAMES,

@@ -30,7 +30,7 @@ import argparse
 import logging
 import math
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -502,7 +502,7 @@ def save_offline_cache(
         "_meta": {
             "source": OFFLINE_CACHE_SOURCE,
             "version": OFFLINE_CACHE_VERSION,
-            "updated_at": datetime.now(UTC).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         },
         "results": results,
         "votes": votes,
@@ -590,7 +590,7 @@ def apply_offline_reading(
             cache[md5] = {
                 **asdict(fresh),
                 "source": OFFLINE_CACHE_SOURCE,
-                "ts": datetime.now(UTC).isoformat(),
+                "ts": datetime.now(timezone.utc).isoformat(),
             }
             guesses.append(fresh)
         voted: NumberGuess | None = vote_number_guess(guesses)
