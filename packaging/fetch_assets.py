@@ -14,7 +14,7 @@
 依赖：标准库 + huggingface_hub（CLIP 段）；用打包 venv（.venv-spike）运行。
 典型调用：
 
-    set BASKETBALL_CLIP_HTTPS_PROXY=http://127.0.0.1:7897
+    set BASKETBALL_CLIP_HTTPS_PROXY=http://127.0.0.1:8080
     .venv-spike/Scripts/python.exe packaging/fetch_assets.py
 
 断点友好：目标已存在且通过文件性检查则跳过；下载走 ``.part`` 临时文件 +

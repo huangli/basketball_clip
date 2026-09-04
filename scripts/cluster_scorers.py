@@ -1,5 +1,5 @@
 """投篮者裁图 embedding 聚类（spec: docs/scorer-cluster/spec.md §数据契约；
-Re-ID 后端见 docs/scorer-reid/spec.md §数据契约 cluster_scorers.py --model 部分）。
+编码后端为 CLIP 单一后端，--model 当前仅接受 "clip"）。
 
 输入：一个或多个 scorer_candidates.json（--candidates 可重复传参，顶层
     {"session","candidates":[...]}，键集取并集、同 key 后者覆盖前者；裁图文件与
@@ -7,7 +7,7 @@ Re-ID 后端见 docs/scorer-reid/spec.md §数据契约 cluster_scorers.py --mod
 输出：--out 指定的 scorer_clusters.json（version/model/threshold/clusters/unclustered
     契约，model = 实际后端 model_tag，rep_crops = 每簇质量分最高的球的 crops 前 2 张）；
     embedding 缓存落 <out 同目录>/clip_cache.json（文件名沿用不改，key = model_tag +
-    裁图 md5，双后端共存不串；threshold 不进缓存键，断点续跑/调档不重复推理）。
+    裁图 md5，单后端下 model_tag 恒为 CLIP 标识；threshold 不进缓存键，断点续跑/调档不重复推理）。
 依赖：scikit-learn（AgglomerativeClustering）、numpy、PIL、scripts/roster.py、
     scripts/pipe_common.py；编码后端 clip（open_clip_torch ViT-B-32 /
     laion2b_s34b_b79k，权重首跑从 HF 下载，需代理时设

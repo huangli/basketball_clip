@@ -374,7 +374,11 @@ class TaskRunner:
         tail: list[str],
         io_error: str | None,
     ) -> None:
-        """进程退出后收尾：cancel_requested → cancelled；0 → done；非 0/IO 异常 → failed。"""
+        """进程退出后收尾：cancel_requested → cancelled；0 → done；非 0/IO 异常 → failed。
+
+        终态事件全部发完才落 ``record.status``：外部以 status 轮询终态时（含测试），
+        看到终态即保证终态事件已入内存队列与落盘，无"状态先行事件后到"的竞态窗口。
+        """
         with self._lock:
             record = self._tasks[task_id]
             if record.status in TERMINAL_STATUSES:  # 防御：收尾只执行一次
@@ -383,20 +387,18 @@ class TaskRunner:
             record.returncode = returncode
             record.finished_at = _utc_now()
             if cancelled:
-                record.status = "cancelled"
+                final_status: TaskStatus = "cancelled"
             elif returncode == 0 and io_error is None:
-                record.status = "done"
+                final_status = "done"
             else:
-                record.status = "failed"
-            final_status = record.status
+                final_status = "failed"
             last_step = self._last_step.get(task_id)
             step_index = record.step_index
             total = record.total_steps
         progress = min(step_index / total, 1.0) if total is not None else None
         if cancelled:
             self._emit(task_id, "log", {"line": "任务已取消（cancel）"})
-            return
-        if final_status == "done":
+        elif final_status == "done":
             if last_step is not None:
                 self._emit(
                     task_id,
@@ -409,20 +411,26 @@ class TaskRunner:
                     },
                 )
             self._emit(task_id, "task_done", {"returncode": returncode})
-            return
-        payload: dict[str, object] = {"returncode": returncode, "tail": tail}
-        if io_error is not None:
-            payload["error"] = io_error
-        if last_step is not None:
-            self._emit(
+        else:
+            payload: dict[str, object] = {"returncode": returncode, "tail": tail}
+            if io_error is not None:
+                payload["error"] = io_error
+            if last_step is not None:
+                self._emit(
+                    task_id,
+                    "step_failed",
+                    {"step": last_step, "step_index": step_index, "total_steps": total, **payload},
+                )
+            self._emit(task_id, "task_failed", payload)
+            logger.error(
+                "任务失败 id=%s returncode=%s io_error=%s tail=%s",
                 task_id,
-                "step_failed",
-                {"step": last_step, "step_index": step_index, "total_steps": total, **payload},
+                returncode,
+                io_error,
+                tail,
             )
-        self._emit(task_id, "task_failed", payload)
-        logger.error(
-            "任务失败 id=%s returncode=%s io_error=%s tail=%s", task_id, returncode, io_error, tail
-        )
+        with self._lock:
+            record.status = final_status
 
     # ---- 内部：事件产出（内存 + 落盘） ----
 
