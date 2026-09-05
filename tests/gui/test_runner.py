@@ -475,3 +475,26 @@ def test_frame_progress_completed_fid_counted_when_next_fid_starts(tmp_path: pat
     frames = _frame_events(runner, record.id)
     assert len(frames) == 2
     assert frames[1]["overall_pct"] == pytest.approx(0.75)
+
+
+def test_frame_progress_gated_to_score_tasks(tmp_path: pathlib.Path) -> None:
+    """kind 门控：非 score 任务喂完整帧进度行（含 === 注册）也不发 frame_progress。
+
+    防未来 people/build/photo 脚本出现同构日志格式（第x/y帧）时误发事件。
+    """
+    # Arrange：行内容与 score 测试逐字相同（分母已注册，若解析必发事件）
+    runner, _, _ = _make_runner(
+        tmp_path,
+        [
+            "=== 0030 (3600帧) ===\n",
+            "  检测进度: 0030 第1200/3600帧\n",
+        ],
+    )
+    # Act
+    record = runner.submit(
+        kind="people", argv=["scripts/video.py", "people"], total_steps=1, cwd=tmp_path
+    )
+    status = _wait_terminal(runner, record.id)
+    # Assert
+    assert status == "done"
+    assert _frame_events(runner, record.id) == []

@@ -27,6 +27,8 @@ r"""GUI 任务编排 runner：subprocess 调 scripts 流水线，按进度协议
 - frame_progress 事件（第七种）：fid / frame / total_frames / overall_pct；
   overall_pct = (已完成 fid 总帧 + 当前 fid 当前帧) / 已注册分母求和，0-1 小数
   （与 v1 progress 字段同口径），单调不减（只发不小于上次的值）。
+- 任务门控：仅 kind == "score"（检测）任务解析帧进度；其他任务类型即使日志
+  同构也不发 frame_progress。
 - 降级：未注册任何分母时不发 frame_progress；解析异常只透传 log。
 """
 
@@ -383,7 +385,10 @@ class TaskRunner:
                 tail.append(line)
                 self._emit(task_id, "log", {"line": line})
                 self._parse_line(task_id, line)
-                self._parse_frame_line(task_id, line)
+                # 帧进度仅 score（检测）任务解析：防 people/build/photo 未来出现
+                # 同构日志行误发 frame_progress；kind 创建后不变，无锁读安全
+                if self._tasks[task_id].kind == "score":
+                    self._parse_frame_line(task_id, line)
         except (OSError, ValueError) as e:
             io_error = f"stdout 读取异常: {type(e).__name__}: {e}"
             logger.error("任务 %s %s", task_id, io_error)
