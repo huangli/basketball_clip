@@ -1,10 +1,10 @@
-"""打包资产下载：ffmpeg（BtbN LGPL）/ yolov8n.pt / CLIP 权重（HF 缓存布局）。
+"""打包资产下载：ffmpeg（BtbN GPL）/ yolov8n.pt / CLIP 权重（HF 缓存布局）。
 
 输入：网络（GitHub / Hugging Face；代理走 ``BASKETBALL_CLIP_HTTPS_PROXY`` 或
     ``HTTPS_PROXY`` 环境变量，均未设置则直连）。
 输出：``packaging/assets/``——
 
-    assets/ffmpeg/bin/ffmpeg.exe, ffprobe.exe   BtbN win64 LGPL 构建（解出 bin/）
+    assets/ffmpeg/bin/ffmpeg.exe, ffprobe.exe   BtbN win64 GPL 构建（解出 bin/）
     assets/ffmpeg/LICENSE.txt, COPYING.*        许可文本随包（spec O2 口径）
     assets/models/yolov8n.pt                    ultralytics 官方 release
     assets/clip/hf-cache/models--laion--*/      CLIP 权重的 HF hub 缓存布局
@@ -46,9 +46,10 @@ CLIP_CACHE_DIR: Path = ASSETS_DIR / "clip" / "hf-cache"
 
 # ---- 资产来源（spec O1/O2/O5 定案口径） ----
 GITHUB_API_LATEST: str = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest"
-# BtbN win64 LGPL 非 shared 变体（如 ffmpeg-n8.0-latest-win64-lgpl-8.0.zip）；
-# 版本段以数字开头，借此排除 -shared 变体
-FFMPEG_ASSET_RE: re.Pattern[str] = re.compile(r"^ffmpeg-\S+-win64-lgpl-\d\S*\.zip$")
+# BtbN win64 GPL 非 shared 变体（如 ffmpeg-n8.1-latest-win64-gpl-8.1.zip）；
+# 版本段以数字开头，借此排除 -shared 变体；
+# 必须用 GPL build——LGPL build 编译时 --disable-libx264，合成/审核片段全灭
+FFMPEG_ASSET_RE: re.Pattern[str] = re.compile(r"^ffmpeg-\S+-win64-gpl-\d\S*\.zip$")
 YOLOV8N_URL: str = "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt"
 CLIP_REPO_ID: str = "laion/CLIP-ViT-B-32-laion2B-s34B-b79K"  # open_clip 注册表精确值
 # open_clip 优先取 safetensors 变体（pretrained.HF_SAFE_WEIGHTS_NAME，实测 605MB fp32）
@@ -120,11 +121,11 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-# ---- ffmpeg（BtbN LGPL） ----
+# ---- ffmpeg（BtbN GPL） ----
 
 
 def _latest_ffmpeg_url() -> tuple[str, str]:
-    """查 BtbN latest release，返回 (win64-lgpl zip 下载地址, tag)。
+    """查 BtbN latest release，返回 (win64-gpl zip 下载地址, tag)。
 
     Raises:
         AssetError: API 失败或未匹配到资产。
@@ -142,21 +143,30 @@ def _latest_ffmpeg_url() -> tuple[str, str]:
         name = str(asset.get("name", ""))
         if FFMPEG_ASSET_RE.match(name):
             return str(asset["browser_download_url"]), tag
-    raise AssetError(f"BtbN release {tag} 未找到 win64-lgpl zip 资产")
+    raise AssetError(f"BtbN release {tag} 未找到 win64-gpl zip 资产")
 
 
 def _check_ffmpeg_layout() -> bool:
-    """ffmpeg 资产已齐备判定：bin/ 双 exe + 许可文本都在。"""
+    """ffmpeg 资产已齐备判定：bin/ 双 exe + 许可文本都在。
+
+    许可文件名不固定：LGPL build 带 LICENSE.txt，GPL build 可能只有 COPYING.*——
+    两者任一存在即算齐备（与解出筛选口径一致）。
+    """
     bin_dir = FFMPEG_DIR / "bin"
     if not (bin_dir / "ffmpeg.exe").is_file() or not (bin_dir / "ffprobe.exe").is_file():
         return False
-    return any(p.is_file() for p in FFMPEG_DIR.glob("LICENSE*"))
+    return any(p.is_file() for p in (*FFMPEG_DIR.glob("LICENSE*"), *FFMPEG_DIR.glob("COPYING*")))
 
 
 def fetch_ffmpeg() -> None:
-    """下载并解出 BtbN ffmpeg bin/ 与许可文本；齐备则跳过，解出后跑 -version 实证。"""
+    """下载并解出 BtbN ffmpeg bin/ 与许可文本；齐备则跳过，解出后跑 -version 实证。
+
+    跳过路径（资产已齐备）同样过 libx264 实证：变体选错（LGPL build 无 libx264）
+    曾致合成全灭，不能靠"文件在"就放行。
+    """
     if _check_ffmpeg_layout():
         logger.info("ffmpeg 资产已齐备，跳过: %s", FFMPEG_DIR)
+        _verify_libx264()
         return
     url, tag = _latest_ffmpeg_url()
     logger.info("BtbN latest release: %s", tag)
@@ -178,7 +188,7 @@ def fetch_ffmpeg() -> None:
                     zf.extract(name, tmp)
         except zipfile.BadZipFile as e:
             raise AssetError(f"ffmpeg zip 损坏: {zip_path}: {e}") from e
-        # zip 内唯一顶层目录（ffmpeg-nX.Y-latest-win64-lgpl-X.Y/），摊平到 assets/ffmpeg/
+        # zip 内唯一顶层目录（ffmpeg-nX.Y-latest-win64-gpl-X.Y/），摊平到 assets/ffmpeg/
         roots = {n.split("/")[0] for n in wanted}
         if len(roots) != 1:
             raise AssetError(f"ffmpeg zip 顶层目录不唯一: {roots}")
@@ -204,7 +214,37 @@ def fetch_ffmpeg() -> None:
             raise AssetError(f"{tool} -version 执行失败: {e}") from e
         if proc.returncode != 0:
             raise AssetError(f"{tool} -version 退出码 {proc.returncode}")
-    logger.info("ffmpeg 资产就绪: %s（-version 实证通过）", FFMPEG_DIR)
+    _verify_libx264()
+    logger.info("ffmpeg 资产就绪: %s（-version + libx264 实证通过）", FFMPEG_DIR)
+
+
+def _verify_libx264() -> None:
+    """实证 bundled ffmpeg 含 libx264 编码器（-encoders 输出含 libx264）。
+
+    LGPL build 编译时 --disable-libx264，流水线合成/审核片段全部依赖它；
+    变体选错时在此显式炸出，不留到打包后。
+
+    Raises:
+        AssetError: -encoders 执行失败或输出不含 libx264。
+    """
+    exe = FFMPEG_DIR / "bin" / "ffmpeg.exe"
+    try:
+        proc = subprocess.run(  # noqa: S603 执行打包自带二进制，路径内部构造
+            [str(exe), "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=FFPROBE_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise AssetError(f"ffmpeg -encoders 执行失败: {e}") from e
+    if proc.returncode != 0 or "libx264" not in proc.stdout:
+        raise AssetError(
+            f"ffmpeg 缺 libx264 编码器（returncode={proc.returncode}）："
+            f"疑似 LGPL build，需换 GPL build: {exe}"
+        )
 
 
 # ---- yolov8n.pt ----

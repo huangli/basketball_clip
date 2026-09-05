@@ -27,7 +27,7 @@ Windows 安装器内嵌 Python 运行时、ffmpeg 与模型权重，零配置开
 
 ### 开发方式
 
-要求：Python ≥ 3.10、ffmpeg + ffprobe 在 PATH 中（推荐 [BtbN 的 LGPL 构建](https://github.com/BtbN/FFmpeg-Builds/releases)，见下文许可声明）。
+要求：Python ≥ 3.10、ffmpeg + ffprobe 在 PATH 中（推荐 [BtbN 的 GPL 构建](https://github.com/BtbN/FFmpeg-Builds/releases)，须含 libx264，见下文许可声明）。
 
 ```powershell
 git clone https://github.com/huangli/basketball-clip.git
@@ -135,7 +135,7 @@ python -m pytest -q
 
 - **本项目主代码**：[MIT](LICENSE)。
 - **ultralytics（YOLO 推理框架）及 `yolov8n.pt` 权重**：[AGPL-3.0](https://github.com/ultralytics/ultralytics/blob/main/LICENSE)。本项目以"按原样调用其公开接口"的方式使用并显式声明该依赖；**如需商用或闭源分发，请自行评估 AGPL 义务或购买 Ultralytics 企业许可**。
-- **ffmpeg**：开发方式由用户自备；安装包内嵌 [BtbN FFmpeg 构建](https://github.com/BtbN/FFmpeg-Builds)（LGPL 版本，许可文本随包附带）。请勿使用含 nonfree 组件的构建（如 gyan.dev full 版）随包分发。
+- **ffmpeg**：开发方式由用户自备；安装包内嵌 [BtbN FFmpeg 构建](https://github.com/BtbN/FFmpeg-Builds)（**GPL 版本**，含 libx264/x265，许可文本随包附带；LGPL 构建编译时禁用 libx264，不可用）。请勿使用含 nonfree 组件的构建（如 gyan.dev full 版）随包分发。
 - **`abdullahtarek_ball.pt` 权重**：源自 [abdullahtarek/basketball_analysis](https://github.com/abdullahtarek/basketball_analysis)（训练数据为 Roboflow 公开数据集）。经查证（2026-09）：该项目 README 声明 MIT，但仓库中无 LICENSE 文件，权重经 Google Drive 单独分发且无独立许可声明，**再分发权利无法确认**——故该权重不随本仓库/安装包再分发，请用户按上文"模型权重"节自行从作者发布页下载。
 - **CLIP 权重**（open_clip ViT-B-32 / laion2b_s34b_b79k）：不随仓库分发；开发方式首次运行从 Hugging Face 自动下载，安装包已内置（离线可用）。
 - **insightface buffalo_l**（仅可选的 `--photo-match` 人脸匹配用）：**非商用许可**，介意者不要使用该开关。
@@ -146,4 +146,4 @@ python -m pytest -q
 
 - Entry point: `python scripts/video.py score|people|build|photo|clean`, or the browser GUI wizard `python -m gui`
 - Requires Python ≥ 3.10 and ffmpeg; model weights are not redistributed with the repo — see the "模型权重" section above for download sources
-- License: MIT for the project code. Note that the ultralytics dependency and YOLO weights are AGPL-3.0 (evaluate obligations or obtain an Ultralytics enterprise license for commercial use); the installer bundles the BtbN LGPL ffmpeg build; the `abdullahtarek_ball.pt` weights' redistribution terms could not be verified, so they are **not** redistributed — users download them from the author's project page.
+- License: MIT for the project code. Note that the ultralytics dependency and YOLO weights are AGPL-3.0 (evaluate obligations or obtain an Ultralytics enterprise license for commercial use); the installer bundles the BtbN GPL ffmpeg build (with libx264); the `abdullahtarek_ball.pt` weights' redistribution terms could not be verified, so they are **not** redistributed — users download them from the author's project page.

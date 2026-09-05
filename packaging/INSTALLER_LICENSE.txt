@@ -1,4 +1,4 @@
-﻿basketball-clip 许可声明
+basketball-clip 许可声明
 ========================
 
 一、本项目主代码（MIT License）
@@ -30,7 +30,7 @@ SOFTWARE.
    本项目以"按原样调用其公开接口"的方式使用并显式声明该依赖；
    如需商用或闭源分发，请自行评估 AGPL 义务或购买 Ultralytics 企业许可。
 
-2. ffmpeg / ffprobe：本安装包内嵌 BtbN FFmpeg 构建（LGPL 版本）。
+2. ffmpeg / ffprobe：本安装包内嵌 BtbN FFmpeg 构建（GPL 版本，含 libx264/x265）。
    https://github.com/BtbN/FFmpeg-Builds
    许可文本随安装附带于安装目录 _internal\assets\ffmpeg\ 下。
 

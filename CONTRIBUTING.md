@@ -8,7 +8,7 @@ basketball-clip 是一个篮球视频进球自动检测与集锦剪辑工具：�
 
 ## 环境搭建
 
-要求：Windows（开发主力平台）、Python ≥ 3.10、ffmpeg + ffprobe 在 PATH 中（推荐 [BtbN 的 LGPL 构建](https://github.com/BtbN/FFmpeg-Builds/releases)）。
+要求：Windows（开发主力平台）、Python ≥ 3.10、ffmpeg + ffprobe 在 PATH 中（推荐 [BtbN 的 GPL 构建](https://github.com/BtbN/FFmpeg-Builds/releases)，须含 libx264）。
 
 ```powershell
 git clone https://github.com/huangli/basketball-clip.git
@@ -61,4 +61,4 @@ pip install ruff
 ## 许可
 
 - 贡献的代码默认按本仓库 [MIT](LICENSE) 许可发布。
-- 注意依赖侧许可：ultralytics 及 YOLO 权重为 AGPL-3.0，安装包内嵌的 ffmpeg 为 LGPL 构建，详见 [README "许可声明"](README.md#许可声明)。引入新依赖前请先确认其许可与本项目兼容，并在 PR 中说明。
+- 注意依赖侧许可：ultralytics 及 YOLO 权重为 AGPL-3.0，安装包内嵌的 ffmpeg 为 GPL 构建，详见 [README "许可声明"](README.md#许可声明)。引入新依赖前请先确认其许可与本项目兼容，并在 PR 中说明。

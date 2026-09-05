@@ -16,7 +16,7 @@
     <exe 同级>/            = app_dir()（用户可写：work/ output/ photos/ models/ scripts/）
     <_MEIPASS>/            = resource_dir()（只读资源）
     <_MEIPASS>/gui/static/ = 前端静态页
-    <_MEIPASS>/assets/ffmpeg/bin/ = BtbN LGPL ffmpeg/ffprobe
+    <_MEIPASS>/assets/ffmpeg/bin/ = BtbN GPL ffmpeg/ffprobe
     <_MEIPASS>/assets/clip/hf-cache/ = CLIP 权重的 HF hub 缓存布局
 
 子进程分发：runner 以 ``[sys.executable, "scripts/video.py", ...]`` 起任务；
