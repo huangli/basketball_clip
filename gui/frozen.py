@@ -62,6 +62,27 @@ def resource_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def reconfigure_stdio_utf8() -> None:
+    """frozen 态强制 stdout/stderr UTF-8；非 frozen 或流不支持时记 WARNING 不炸。
+
+    PyInstaller bootloader 以 isolated=1 + ignore_environment=1 起 Python
+    （``sys.flags`` 实证），PYTHONIOENCODING/PYTHONUTF8 被忽略，Windows 上
+    stdout/stderr 落 cp1252 且 stderr errors=backslashreplace——中文 print
+    全变 ``\\uXXXX`` 转义，GUI 日志区乱码且 runner 进度协议（``执行: ``
+    步骤边界、``第x/y帧`` 帧进度）失配。runner 侧按 UTF-8 解码
+    （gui/runner.py text=True encoding="utf-8"），故 frozen 侧强制 UTF-8
+    后全链对齐。
+    """
+    if not is_frozen():
+        return
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, OSError, ValueError):
+            logger.warning("sys.%s 不支持 reconfigure，跳过 UTF-8 强制", name)
+
+
 def freeze_support_guard() -> None:
     """multiprocessing spawn 子进程守卫；非 frozen 态 no-op。
 
@@ -129,6 +150,9 @@ def dispatch_script(argv: list[str]) -> bool:
         print(f"错误: 脚本不存在或不在 scripts/ 目录内: {script}", file=sys.stderr)  # noqa: T201
         raise SystemExit(2)
     bootstrap_env()  # 子进程同样要 ffmpeg PATH / CLIP 离线（env copy 之外的双保险）
+    # 子进程 stdio 强制 UTF-8 必须在 runpy 之前：脚本 print 的中文与进度协议
+    # 由 runner 按 UTF-8 解码，cp1252+backslashreplace 会全链乱码失配
+    reconfigure_stdio_utf8()
     sys.argv = [str(script), *argv[2:]]
     # scripts 内模块平级互 import（from errors import ...），目录前插 sys.path
     sys.path.insert(0, str(scripts_root))

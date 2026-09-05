@@ -45,13 +45,17 @@ def _find_free_port(host: str = HOST, start: int = DEFAULT_PORT, tries: int = PO
 def main() -> None:
     """启动 GUI 服务（阻塞至 Ctrl+C）。
 
-    frozen（PyInstaller）态先做两件事：multiprocessing spawn 守卫；argv[1] 为
+    frozen（PyInstaller）态先做三件事：multiprocessing spawn 守卫；argv[1] 为
     scripts/ 内 .py 时 exe 充当 Python 解释器分发执行（runner 以 sys.executable
-    起子进程的既有口径不变），分发命中则不起 GUI。
+    起子进程的既有口径不变），分发命中则不起 GUI；stdio 强制 UTF-8（isolated
+    模式忽略 PYTHONIOENCODING，不强制则中文日志落 cp1252 转义）。
     """
     frozen.freeze_support_guard()
     if frozen.dispatch_script(sys.argv):
         return
+    # stdio 强制 UTF-8 在 bootstrap_env 与 logging.basicConfig 之前：
+    # uvicorn/app 自身日志（含中文）也要按 UTF-8 落 stderr
+    frozen.reconfigure_stdio_utf8()
     frozen.bootstrap_env()
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
