@@ -1,4 +1,4 @@
-"""GUI 任务编排 runner：subprocess 调 scripts 流水线，按进度协议 v1 解析产出事件。
+r"""GUI 任务编排 runner：subprocess 调 scripts 流水线，按进度协议 v1 解析产出事件。
 
 输入：任务提交（kind / argv / total_steps / cwd），子进程 stdout 逐行日志。
 输出：内存事件流 + 落盘 ``work/.gui/tasks/<task_id>.jsonl``（追加写，可断线重连回放）。
@@ -17,6 +17,17 @@
 - 日志透传：所有行原样发 log 事件。
 - 事件类型：step_start / step_done / step_failed / log / task_done / task_failed，共六种。
 - 降级规则：任何解析异常/格式不识别的行只透传 log，进度保持上次值，绝不报错中断任务。
+
+进度协议 v1.1（在 v1 上增量，v1 六种事件与字段契约不变）：
+- 帧进度三规则（锚定 mot_candidates.py 实际日志格式 :669/:675/:690）：
+  1. ``=== <fid> (<N>帧) ===`` → 注册该 fid 总帧数分母（每个 fid 都输出，含缓存命中）；
+     新 fid 注册时，上一个未完成的 fid 视为完成（被越过即计满）。
+  2. ``命中缓存`` 行 → 当前 fid 标记完成（分子计入全部 N 帧），不发事件。
+  3. ``第(\d+)/(\d+)帧`` → 更新当前 fid 帧，发 frame_progress。
+- frame_progress 事件（第七种）：fid / frame / total_frames / overall_pct；
+  overall_pct = (已完成 fid 总帧 + 当前 fid 当前帧) / 已注册分母求和，0-1 小数
+  （与 v1 progress 字段同口径），单调不减（只发不小于上次的值）。
+- 降级：未注册任何分母时不发 frame_progress；解析异常只透传 log。
 """
 
 from __future__ import annotations
@@ -44,7 +55,14 @@ STEP_START_RE = re.compile(r"执行: (.+)$")  # video.py run_step 既有日志�
 TAIL_LINES = 20  # step_failed/task_failed 携带的末尾日志行数
 TASKS_SUBDIR = Path(".gui") / "tasks"  # 相对 work 目录的落盘子目录
 
-EventType = Literal["step_start", "step_done", "step_failed", "log", "task_done", "task_failed"]
+# 进度协议 v1.1 常量（帧级进度，逐字锚定 mot_candidates.py :669/:675/:690）
+FID_TOTAL_RE = re.compile(r"=== (.+?) \((\d+)帧\) ===")  # :669 注册 fid 总帧数分母
+CACHE_HIT_RE = re.compile(r"命中缓存")  # :675 当前 fid 瞬时完成（断点续跑口径）
+FRAME_PROGRESS_RE = re.compile(r"第(\d+)/(\d+)帧")  # :690 当前 fid 帧进度
+
+EventType = Literal[
+    "step_start", "step_done", "step_failed", "log", "task_done", "task_failed", "frame_progress"
+]
 TaskStatus = Literal["pending", "running", "done", "failed", "cancelled"]
 
 TERMINAL_STATUSES: tuple[TaskStatus, ...] = ("done", "failed", "cancelled")
@@ -123,6 +141,36 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+@dataclass(slots=True)
+class _FrameProgressState:
+    """单任务帧进度跟踪（协议 v1.1 内部状态，不落入事件）。
+
+    Attributes:
+        totals: fid → 总帧数（已注册分母，``=== <fid> (<N>帧) ===`` 行注册）。
+        done: 已完成 fid 集合（缓存命中，或被下一个 fid 越过）。
+        current_fid: 最近一个 ``===`` 行注册的 fid（帧进度行/缓存行的归属）。
+        current_frame: current_fid 的最新帧号（缓存命中时计满总帧）。
+        last_overall: 已发出的 overall_pct 上限（单调不减裁剪用）。
+    """
+
+    totals: dict[str, int] = field(default_factory=dict)
+    done: set[str] = field(default_factory=set)
+    current_fid: str | None = None
+    current_frame: int = 0
+    last_overall: float = 0.0
+
+    def overall_pct(self) -> float | None:
+        """计算 overall_pct（0-1，单调不减裁剪）；无分母时返回 None（不发事件）。"""
+        denominator = sum(self.totals.values())
+        if denominator <= 0 or self.current_fid is None:
+            return None
+        done_frames = sum(self.totals[fid] for fid in self.done)
+        current = 0 if self.current_fid in self.done else self.current_frame
+        pct = min(max((done_frames + current) / denominator, self.last_overall), 1.0)
+        self.last_overall = pct
+        return pct
+
+
 def _default_popen(cmd: list[str], cwd: Path, env: dict[str, str]) -> ProcLike:
     """真实子进程工厂：stderr 并入 stdout，UTF-8 文本模式逐行读。
 
@@ -162,6 +210,7 @@ class TaskRunner:
         self._procs: dict[str, ProcLike] = {}
         self._cancel_requested: set[str] = set()
         self._last_step: dict[str, str] = {}
+        self._frame_state: dict[str, _FrameProgressState] = {}
         self._listeners: dict[str, list[queue.Queue[dict[str, object]]]] = {}
         self._lock = threading.Lock()
 
@@ -334,6 +383,7 @@ class TaskRunner:
                 tail.append(line)
                 self._emit(task_id, "log", {"line": line})
                 self._parse_line(task_id, line)
+                self._parse_frame_line(task_id, line)
         except (OSError, ValueError) as e:
             io_error = f"stdout 读取异常: {type(e).__name__}: {e}"
             logger.error("任务 %s %s", task_id, io_error)
@@ -366,6 +416,51 @@ class TaskRunner:
                 "progress": progress,
             },
         )
+
+    def _parse_frame_line(self, task_id: str, line: str) -> None:
+        """协议 v1.1 帧进度解析：分母注册 / 缓存命中 / 帧进度三规则。
+
+        与 v1 同降级口径：任何异常/不识别的行只透传 log，不发事件、不报错中断；
+        未注册任何分母（无 ``===`` 行）时帧进度行不发 frame_progress（v1 行为不变）。
+        """
+        try:
+            total_match = FID_TOTAL_RE.search(line)
+            cache_hit = CACHE_HIT_RE.search(line) is not None
+            frame_match = FRAME_PROGRESS_RE.search(line)
+        except re.error:  # pragma: no cover - 常量正则不会坏，防御性兜底
+            return
+        payload: dict[str, object] | None = None
+        with self._lock:
+            state = self._frame_state.setdefault(task_id, _FrameProgressState())
+            if total_match is not None:
+                fid = total_match.group(1)
+                if state.current_fid is not None and state.current_fid != fid:
+                    state.done.add(state.current_fid)  # 被下一个 fid 越过即视为完成
+                state.totals[fid] = int(total_match.group(2))
+                state.current_fid = fid
+                state.current_frame = 0
+                return  # 分母注册本身不发事件，等帧行/缓存行
+            if state.current_fid is None:
+                return
+            if cache_hit:
+                # 只标记完成（分子计入全部 N 帧）不发事件：后续 fid 分母尚未注册，
+                # 此时发事件会算出虚高值并抬升单调下限，污染后续混合口径
+                state.done.add(state.current_fid)
+                state.current_frame = state.totals[state.current_fid]
+                return
+            if frame_match is None:
+                return
+            state.current_frame = int(frame_match.group(1))
+            pct = state.overall_pct()
+            if pct is not None:
+                payload = {
+                    "fid": state.current_fid,
+                    "frame": state.current_frame,
+                    "total_frames": state.totals[state.current_fid],
+                    "overall_pct": pct,
+                }
+        if payload is not None:
+            self._emit(task_id, "frame_progress", payload)
 
     def _finalize(
         self,

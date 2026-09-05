@@ -5,8 +5,10 @@
  * 接口契约以 gui/app.py 为准：
  * - 错误一律 {"error": "中文消息"} + 4xx/5xx
  * - 任务提交返回 {task_id, kind, session, status, step_index, total_steps, progress, ...}
- * - SSE /api/tasks/{id}/events 六种事件：step_start/step_done/step_failed/log/task_done/task_failed；
- *   total_steps 为 null 时进度降级为转圈 + 日志滚动；cancelled 无终态事件，轮询 /api/tasks/{id} 兜底。
+ * - SSE /api/tasks/{id}/events 事件：step_start/step_done/step_failed/log/task_done/task_failed
+ *   （协议 v1）+ frame_progress（协议 v1.1，检测任务帧级近似百分比）；
+ *   total_steps 为 null 且无 frame_progress 时进度降级为转圈 + 日志滚动；
+ *   cancelled 无终态事件，轮询 /api/tasks/{id} 兜底。
  */
 
 // ---- 常量 ----
@@ -315,6 +317,24 @@ function updateProgress(ui, stepIndex, totalSteps, stepName) {
     "步骤 " + stepIndex + "/" + totalSteps + (stepName ? "：" + stepName : "");
 }
 
+// 帧级进度（协议 v1.1 frame_progress 事件）：检测步显示"约 N%"+ 当前 fid x/y 帧；
+// overall_pct 与后端 progress 同口径为 0-1 小数，前端乘 100 展示
+function updateFrameProgress(ui, ev) {
+  ui.track.classList.remove("indeterminate");
+  var pct = Math.min(Math.max(ev.overall_pct * 100, 0), 100);
+  ui.bar.style.width = pct + "%";
+  ui.statusLine.textContent =
+    "检测中：约 " +
+    Math.round(pct) +
+    "%（" +
+    ev.fid +
+    " 第" +
+    ev.frame +
+    "/" +
+    ev.total_frames +
+    "帧）";
+}
+
 function finishTask(ui, ok, message) {
   ui.track.classList.remove("indeterminate");
   ui.cancelBtn.disabled = true;
@@ -403,6 +423,9 @@ function followTask(taskId, ui, onTerminal) {
         break;
       case "step_done":
         updateProgress(ui, ev.step_index, ev.total_steps, ev.step + "（完成）");
+        break;
+      case "frame_progress":
+        updateFrameProgress(ui, ev);
         break;
       case "step_failed":
         appendLog(ui.logBox, "✗ 步骤失败: " + ev.step);

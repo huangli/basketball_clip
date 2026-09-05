@@ -1,6 +1,7 @@
-"""gui.runner 任务编排单元测试：进度协议 v1 五条路径（成功/失败/中断/降级/落盘回放）。
+"""gui.runner 任务编排单元测试：进度协议 v1 五条路径 + v1.1 帧进度（frame_progress）。
 
 全部用 FakeProcess 注入 stdout 行序列，不启动任何真子进程（rules.md §9：慢外部 mock）。
+v1.1 日志行格式锚定 scripts/mot_candidates.py:669/:675/:690 实际输出。
 """
 
 from __future__ import annotations
@@ -336,3 +337,141 @@ def test_thread_safety_submit_multiple(tmp_path: pathlib.Path) -> None:
     assert len(fakes) == 4
     for task_id in runner.list_tasks():
         assert _wait_terminal(runner, task_id) == "done"
+
+
+# ---- 协议 v1.1：frame_progress 帧进度事件 ----
+
+
+def _frame_events(runner: TaskRunner, task_id: str) -> list[dict[str, object]]:
+    """取任务全部 frame_progress 事件。"""
+    return [e for e in _events(runner, task_id) if e["type"] == "frame_progress"]
+
+
+def test_frame_progress_basic_fields_and_overall(tmp_path: pathlib.Path) -> None:
+    """单 fid 新检：=== 注册分母后，第x/y帧 行发 frame_progress，字段与 overall 正确。"""
+    # Arrange：格式逐字锚定 mot_candidates.py:669/:690
+    runner, _, _ = _make_runner(
+        tmp_path,
+        [
+            "=== 0030 (3600帧) ===\n",
+            "  检测进度: 0030 第1200/3600帧\n",
+            "  检测进度: 0030 第2400/3600帧\n",
+        ],
+    )
+    # Act
+    record = runner.submit(
+        kind="score", argv=["scripts/video.py", "score"], total_steps=None, cwd=tmp_path
+    )
+    status = _wait_terminal(runner, record.id)
+    # Assert
+    assert status == "done"
+    frames = _frame_events(runner, record.id)
+    assert len(frames) == 2
+    assert frames[0]["fid"] == "0030"
+    assert frames[0]["frame"] == 1200
+    assert frames[0]["total_frames"] == 3600
+    assert frames[0]["overall_pct"] == pytest.approx(1200 / 3600)
+    assert frames[1]["frame"] == 2400
+    assert frames[1]["overall_pct"] == pytest.approx(2400 / 3600)
+
+
+def test_frame_progress_cache_hit_mixed_with_fresh_detect(tmp_path: pathlib.Path) -> None:
+    """续跑口径：缓存命中 fid 计入分子+分母，与新检 fid 混合时 overall 不失真。
+
+    fid1 缓存 3600 帧完成 + fid2 跑到 1200/3600 → overall = (3600+1200)/7200 ≈ 0.667。
+    缓存命中行格式锚定 mot_candidates.py:675。
+    """
+    # Arrange
+    runner, _, _ = _make_runner(
+        tmp_path,
+        [
+            "=== fid1 (3600帧) ===\n",
+            "  检测: 命中缓存 avg0.5球/帧 共1800检测\n",
+            "=== fid2 (3600帧) ===\n",
+            "  检测进度: fid2 第1200/3600帧\n",
+        ],
+    )
+    # Act
+    record = runner.submit(
+        kind="score", argv=["scripts/video.py", "score"], total_steps=None, cwd=tmp_path
+    )
+    status = _wait_terminal(runner, record.id)
+    # Assert
+    assert status == "done"
+    frames = _frame_events(runner, record.id)
+    # 缓存命中只标记完成不发事件（此时 fid2 分母未注册，发事件会虚高并抬升单调下限）
+    assert len(frames) == 1
+    # 混合口径：fid2 帧行 → overall = (3600+1200)/7200 ≈ 0.667
+    assert frames[0]["fid"] == "fid2"
+    assert frames[0]["frame"] == 1200
+    assert frames[0]["total_frames"] == 3600
+    assert frames[0]["overall_pct"] == pytest.approx((3600 + 1200) / 7200)
+
+
+def test_frame_progress_overall_monotonic_non_decreasing(tmp_path: pathlib.Path) -> None:
+    """分母逐步并入致计算值回落时，overall_pct 单调不减裁剪（只发不小于上次的值）。"""
+    # Arrange：fid1 跑满 100% 后 fid2 才注册，分母变大使原始计算值回落
+    runner, _, _ = _make_runner(
+        tmp_path,
+        [
+            "=== fid1 (100帧) ===\n",
+            "  检测进度: fid1 第100/100帧\n",
+            "=== fid2 (1000帧) ===\n",
+            "  检测进度: fid2 第10/1000帧\n",
+            "  检测进度: fid2 第200/1000帧\n",
+        ],
+    )
+    # Act
+    record = runner.submit(
+        kind="score", argv=["scripts/video.py", "score"], total_steps=None, cwd=tmp_path
+    )
+    _wait_terminal(runner, record.id)
+    # Assert：原始值 1.0 → 0.1 → 0.27，裁剪后单调不减
+    frames = _frame_events(runner, record.id)
+    assert len(frames) == 3
+    pcts = [float(e["overall_pct"]) for e in frames]
+    assert pcts == sorted(pcts)
+    assert pcts[0] == pytest.approx(1.0)
+    assert pcts[1] == pytest.approx(1.0)  # (100+10)/1100=0.1 被裁剪为上次值
+    assert pcts[2] == pytest.approx(1.0)  # (100+200)/1100≈0.27 仍被裁剪
+
+
+def test_frame_progress_not_emitted_without_registered_fid(tmp_path: pathlib.Path) -> None:
+    """降级：未注册分母（无 === 行）时帧行不发事件；无帧行任务行为与 v1 完全一致。"""
+    # Arrange：帧进度行先于 === 出现（乱序/跨步串日志），不应发事件
+    runner, _, _ = _make_runner(
+        tmp_path,
+        ["  检测进度: 0030 第1200/3600帧\n", "普通日志\n"],
+    )
+    # Act
+    record = runner.submit(
+        kind="people", argv=["scripts/video.py", "people"], total_steps=1, cwd=tmp_path
+    )
+    status = _wait_terminal(runner, record.id)
+    # Assert
+    assert status == "done"
+    assert _frame_events(runner, record.id) == []
+    assert _types(runner, record.id).count("log") == 2
+
+
+def test_frame_progress_completed_fid_counted_when_next_fid_starts(tmp_path: pathlib.Path) -> None:
+    """新检 fid 被下一个 === 越过即视为完成：分子计入其全部总帧。"""
+    # Arrange：fid1 只日志到 200/400（非 200 整除的尾帧不打日志），fid2 开始后 fid1 应计满
+    runner, _, _ = _make_runner(
+        tmp_path,
+        [
+            "=== fid1 (400帧) ===\n",
+            "  检测进度: fid1 第200/400帧\n",
+            "=== fid2 (400帧) ===\n",
+            "  检测进度: fid2 第200/400帧\n",
+        ],
+    )
+    # Act
+    record = runner.submit(
+        kind="score", argv=["scripts/video.py", "score"], total_steps=None, cwd=tmp_path
+    )
+    _wait_terminal(runner, record.id)
+    # Assert：fid2 行 → overall = (400+200)/800 = 0.75（fid1 计满而非停在 200）
+    frames = _frame_events(runner, record.id)
+    assert len(frames) == 2
+    assert frames[1]["overall_pct"] == pytest.approx(0.75)
