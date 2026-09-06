@@ -68,6 +68,9 @@ PEOPLE_SINGLE_BATCH_STEPS: int = 3
 SSE_POLL_SECONDS: float = 0.5
 # 批次 goals 双轨命名（与 scripts/video.py GOALS_BATCH_RE 同契约，本地实现不 import）
 GOALS_BATCH_RE: re.Pattern[str] = re.compile(r"^goals_batch(\d+)\.json$")
+# 批次 candidates/review 命名（与 GOALS_BATCH_RE 同双轨契约，批次发现补充源）
+CANDIDATES_BATCH_RE: re.Pattern[str] = re.compile(r"^candidates_batch(\d+)\.json$")
+REVIEW_BATCH_RE: re.Pattern[str] = re.compile(r"^review_batch(\d+)$")
 # 场次目录识别标记（work/ 下还有 detect/frames/.gui 等共享目录，靠标记物区分）
 SESSION_MARKERS: tuple[str, ...] = (
     "video_cli.json",
@@ -235,18 +238,48 @@ def _batch_paths(session_dir: Path, goals_name: str, batch: int) -> dict[str, An
 
 
 def _discover_batches(session_dir: Path) -> list[dict[str, Any]]:
-    """扫 goals 文件定位批次（双轨），按批次号升序；无法识别的名记 WARNING 跳过。"""
-    batches: list[dict[str, Any]] = []
+    """扫 goals/candidates/review 三类产物定位批次（双轨），按批次号归并升序。
+
+    检测刚完成未标注时只有 candidates/review，无 goals 文件，故三类源取并集；
+    同批次号多源归并为一条（goals 源优先定配套推导轨）；无法识别的名记 WARNING 跳过。
+    """
+    # 批次号 → _batch_paths 的 goals_name（决定 candidates/review 配套轨与 goals 标志）
+    tracks: dict[int, str] = {}
     for goals_path in sorted(session_dir.glob("goals*.json")):
         name = goals_path.name
         if name == "goals.json":
-            batches.append(_batch_paths(session_dir, name, 1))
+            tracks.setdefault(1, name)
             continue
         m = GOALS_BATCH_RE.match(name)
         if m is None or int(m.group(1)) < 1:
             logger.warning("无法识别的 goals 文件，跳过: %s", name)
             continue
-        batches.append(_batch_paths(session_dir, name, int(m.group(1))))
+        tracks.setdefault(int(m.group(1)), name)
+    for candidates_path in sorted(session_dir.glob("candidates*.json")):
+        name = candidates_path.name
+        if name == "candidates.json":
+            tracks.setdefault(1, "goals.json")
+            continue
+        m = CANDIDATES_BATCH_RE.match(name)
+        if m is None or int(m.group(1)) < 1:
+            logger.warning("无法识别的 candidates 文件，跳过: %s", name)
+            continue
+        batch = int(m.group(1))
+        tracks.setdefault(batch, f"goals_batch{batch}.json")
+    for review_path in sorted(session_dir.glob("review*")):
+        if not review_path.is_dir():
+            continue
+        name = review_path.name
+        if name == "review":
+            tracks.setdefault(1, "goals.json")
+            continue
+        m = REVIEW_BATCH_RE.match(name)
+        if m is None or int(m.group(1)) < 1:
+            logger.warning("无法识别的 review 目录，跳过: %s", name)
+            continue
+        batch = int(m.group(1))
+        tracks.setdefault(batch, f"goals_batch{batch}.json")
+    batches = [_batch_paths(session_dir, goals_name, batch) for batch, goals_name in tracks.items()]
     batches.sort(key=lambda b: int(b["batch"]))
     return batches
 

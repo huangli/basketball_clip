@@ -265,6 +265,67 @@ def test_session_status_detail(tmp_path: pathlib.Path) -> None:
     assert data["outputs"] == ["合集.mp4"]
 
 
+def test_session_status_batches_candidates_only(tmp_path: pathlib.Path) -> None:
+    """标注阶段场景：只有 candidates_batch1 + review_batch1（无 goals）→ 批次 1 仍被发现。"""
+    client, _, _ = _make_client(tmp_path)
+    sd = tmp_path / "work" / "20260802"
+    (sd / "review_batch1").mkdir(parents=True)
+    (sd / "candidates_batch1.json").write_text("{}", encoding="utf-8")
+    (sd / "review_batch1" / "label.html").write_text("<html>标注</html>", encoding="utf-8")
+
+    resp = client.get("/api/sessions/20260802/status")
+    assert resp.status_code == 200
+    assert resp.json()["batches"] == [
+        {
+            "batch": 1,
+            "goals": False,
+            "candidates": True,
+            "label_page": "/pages/20260802/review_batch1/label.html",
+            "scorer_page": None,
+        }
+    ]
+
+
+def test_session_status_batches_goals_regression(tmp_path: pathlib.Path) -> None:
+    """回归锁定：已有 goals_batch2 的场次输出与修复前一致（goals 源行为不变）。"""
+    client, _, _ = _make_client(tmp_path)
+    sd = tmp_path / "work" / "20260803"
+    (sd / "review_batch2").mkdir(parents=True)
+    (sd / "candidates_batch2.json").write_text("{}", encoding="utf-8")
+    (sd / "goals_batch2.json").write_text('{"goals": []}', encoding="utf-8")
+    (sd / "review_batch2" / "label.html").write_text("<html>标注</html>", encoding="utf-8")
+
+    resp = client.get("/api/sessions/20260803/status")
+    assert resp.status_code == 200
+    assert resp.json()["batches"] == [
+        {
+            "batch": 2,
+            "goals": True,
+            "candidates": True,
+            "label_page": "/pages/20260803/review_batch2/label.html",
+            "scorer_page": None,
+        }
+    ]
+
+
+def test_session_status_batches_mixed_sources(tmp_path: pathlib.Path) -> None:
+    """混合：批次 1 只有 candidates、批次 2 有 goals → 两条都出且按批次号升序。"""
+    client, _, _ = _make_client(tmp_path)
+    sd = tmp_path / "work" / "20260804"
+    (sd / "review_batch2").mkdir(parents=True)
+    (sd / "candidates_batch1.json").write_text("{}", encoding="utf-8")
+    (sd / "goals_batch2.json").write_text('{"goals": []}', encoding="utf-8")
+
+    resp = client.get("/api/sessions/20260804/status")
+    assert resp.status_code == 200
+    batches = resp.json()["batches"]
+    assert [b["batch"] for b in batches] == [1, 2]
+    assert batches[0]["goals"] is False
+    assert batches[0]["candidates"] is True
+    assert batches[1]["goals"] is True
+    assert batches[1]["label_page"] is None
+
+
 def test_session_status_404_and_400(tmp_path: pathlib.Path) -> None:
     client, _, _ = _make_client(tmp_path)
     assert client.get("/api/sessions/20990101/status").status_code == 404
