@@ -26,9 +26,50 @@ from pathlib import Path
 from typing import Any
 
 from errors import SchemaError
+from team_config import DEFAULT_OPPONENT, load_team_config
+
+# 伪球员：用户一键把进球标为“对手”，不识别具体是谁（docs/opponent-filter/spec.md）
+OPPONENT_TAG: str = "对手"
+
 
 # assignments 键格式：<file>#<t:.1f>（file 可含任意字符除 # 结尾的时间部分，t 必须恰为一位小数）
 _KEY_PATTERN: re.Pattern[str] = re.compile(r"^(?P<file>.+)#(?P<t>-?\d+(?:\.\d+)?)$")
+
+
+def is_opponent_tag(tag: str) -> bool:
+    """判断标签是否为伪球员"对手"。"""
+    return tag == OPPONENT_TAG
+
+
+def opponent_of(session: str) -> str:
+    """对手队名 = 场次 ID 第一个 ``_`` 后的后缀。
+
+    无后缀 / 后缀空白 → 回退 ``DEFAULT_OPPONENT``（通用默认"对手"）。
+    与 gen_scorer_page 历史口径保持一致，集中于此模块供调用方复用。
+
+    Args:
+        session: 场次 ID，如 ``20260801_湖人``。
+
+    Returns:
+        对手队名（黑/蓝球衣标签的 team 值）。
+    """
+    parts = session.strip().split("_", 1)
+    if len(parts) == 2 and parts[1].strip():
+        return parts[1].strip()
+    return DEFAULT_OPPONENT
+
+
+def opponent_team_name(session_dir: Path) -> str:
+    """取当前场次有效对手队名：team_config.opponent 优先，缺省按场次 ID 后缀派生。
+
+    Args:
+        session_dir: work/<场次>/ 目录。
+
+    Returns:
+        非空对手队名字符串。
+    """
+    cfg = load_team_config(session_dir)
+    return cfg.opponent or opponent_of(session_dir.name)
 
 
 @dataclass(frozen=True, slots=True)

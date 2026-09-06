@@ -20,7 +20,7 @@ import pytest
 
 import video
 from errors import BasketballPipelineError, SchemaError
-from roster import format_key
+from roster import OPPONENT_TAG, format_key
 from video import Batch
 
 SESSION: str = "s1"
@@ -1115,7 +1115,7 @@ class TestBuild:
         rawdir = self._setup(session_dir, roster=True)
         rc = video.main(["build", "--session", SESSION, "--rawdir", str(rawdir), "--all", "--4k"])
         assert rc == 0
-        assert len(run_recorder) == 4
+        assert len(run_recorder) == 2
         our_team = next(c[0] for c in run_recorder if c[0][-2:] == ["--team", "主队"])
         assert "--name-suffix" not in our_team
         assert our_team[our_team.index("--out") + 1] == "3840x2160"
@@ -1168,7 +1168,7 @@ class TestBuild:
         rawdir = self._setup(session_dir, roster=True)
         rc = video.main(["build", "--session", SESSION, "--rawdir", str(rawdir), "--all"])
         assert rc == 0
-        assert len(run_recorder) == 4
+        assert len(run_recorder) == 2
         our = next(c[0] for c in run_recorder if c[0][-2:] == ["--team", "主队"])
         assert our[our.index("--out") + 1] == "3840x2160"
         assert "--name-suffix" not in our
@@ -1203,11 +1203,11 @@ class TestBuild:
         argv = ["build", "--session", SESSION, "--rawdir", str(rawdir), "--all"]
         assert video.main(argv) == 0
         assert video.main(argv) == 0
-        assert len(run_recorder) == 8
-        first = [c[0] for c in run_recorder[:4]]
-        second = [c[0] for c in run_recorder[4:]]
+        assert len(run_recorder) == 4
+        first = [c[0] for c in run_recorder[:2]]
+        second = [c[0] for c in run_recorder[2:]]
         assert first == second
-        our = next(c[0] for c in run_recorder[:4] if c[0][-2:] == ["--team", "主队"])
+        our = next(c[0] for c in run_recorder[:2] if c[0][-2:] == ["--team", "主队"])
         assert our[our.index("--out") + 1] == "3840x2160"
         assert "--name-suffix" not in our
 
@@ -1219,14 +1219,12 @@ class TestBuild:
         rawdir = self._setup(session_dir, roster=True)
         rc = video.main(["build", "--session", SESSION, "--rawdir", str(rawdir), "--all"])
         assert rc == 0
-        # 黑-B 无归属球零命中跳过：2 人（红-7、黑-A）+ 2 队（主队、对手）= 4 条
-        assert len(run_recorder) == 4
+        # 黑-A/B 属对手队，--all 默认跳过；黑-B 也无命中：只出我方 1 人 + 1 队
+        assert len(run_recorder) == 2
         tail = [c[0][-2:] for c in run_recorder]
         assert tail == [
             ["--scorer", "红-7"],
-            ["--scorer", "黑-A"],
             ["--team", "主队"],
-            ["--team", "对手"],
         ]
 
     def test_batch_filter(
@@ -1331,6 +1329,87 @@ class TestBuild:
             ["build", "--session", SESSION, "--rawdir", str(rawdir), "--all", "--dry-run"]
         )
         assert rc == 0
+
+
+class TestBuildOpponentFilter:
+    """对手过滤：--all 默认跳过对手个人/分队合集；显式 --team/--scorer 对手保留通道。"""
+
+    def _setup(self, session_dir: pathlib.Path, *, opponent_team: str = "对手") -> pathlib.Path:
+        _write_json(session_dir / "goals_batch1.json", _goals_payload())
+        _write_json(session_dir / "candidates_batch1.json", [])
+        _write_json(session_dir / "session_facts.json", _facts_payload())
+        _write_json(
+            session_dir / "roster.json",
+            {
+                "confirmed": True,
+                "players": [
+                    {"tag": "红-7", "name": "", "team": "主队"},
+                    {"tag": OPPONENT_TAG, "name": "", "team": opponent_team},
+                    {"tag": "黑-A", "name": "", "team": opponent_team},
+                ],
+                "assignments": {
+                    format_key("f0.mp4", 0.5): "红-7",
+                    format_key("f1.mp4", 1.5): OPPONENT_TAG,
+                    format_key("f2.mp4", 2.5): "黑-A",
+                },
+            },
+        )
+        rawdir = session_dir.parent.parent / "raw"
+        rawdir.mkdir()
+        return rawdir
+
+    def test_all_skips_opponent_personal_and_team(
+        self,
+        session_dir: pathlib.Path,
+        run_recorder: list[tuple[list[str], dict[str, str]]],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        rawdir = self._setup(session_dir)
+        caplog.set_level(logging.WARNING)
+        rc = video.main(["build", "--session", SESSION, "--rawdir", str(rawdir), "--all"])
+        assert rc == 0
+        tail = [c[0][-2:] for c in run_recorder]
+        assert tail == [["--scorer", "红-7"], ["--team", "主队"]]
+        assert "对手" in caplog.text
+
+    def test_explicit_team_opponent_allowed(
+        self,
+        session_dir: pathlib.Path,
+        run_recorder: list[tuple[list[str], dict[str, str]]],
+    ) -> None:
+        rawdir = self._setup(session_dir)
+        rc = video.main(["build", "--session", SESSION, "--rawdir", str(rawdir), "--team", "对手"])
+        assert rc == 0
+        assert len(run_recorder) == 1
+        assert run_recorder[0][0][-2:] == ["--team", "对手"]
+
+    def test_explicit_scorer_opponent_allowed(
+        self,
+        session_dir: pathlib.Path,
+        run_recorder: list[tuple[list[str], dict[str, str]]],
+    ) -> None:
+        rawdir = self._setup(session_dir)
+        rc = video.main(
+            ["build", "--session", SESSION, "--rawdir", str(rawdir), "--scorer", OPPONENT_TAG]
+        )
+        assert rc == 0
+        assert len(run_recorder) == 1
+        assert run_recorder[0][0][-2:] == ["--scorer", OPPONENT_TAG]
+
+    def test_configured_opponent_name_also_skipped(
+        self,
+        session_dir: pathlib.Path,
+        run_recorder: list[tuple[list[str], dict[str, str]]],
+    ) -> None:
+        rawdir = self._setup(session_dir, opponent_team="湖人")
+        _write_json(
+            session_dir / "team_config.json",
+            {"version": 1, "team_name": "主队", "opponent": "湖人"},
+        )
+        rc = video.main(["build", "--session", SESSION, "--rawdir", str(rawdir), "--all"])
+        assert rc == 0
+        tail = [c[0][-2:] for c in run_recorder]
+        assert tail == [["--scorer", "红-7"], ["--team", "主队"]]
 
 
 class TestBuildHeatmap:
@@ -1462,9 +1541,9 @@ class TestBuildMultiBatch:
         self._roster_full_hits(session_dir)
         # Act
         rc = video.main(["build", "--session", SESSION, "--rawdir", str(rawdir), "--all"])
-        # Assert：2 球员 + 2 队 = 4 条命令，每 filter 只调一次，--goals 指向合并文件
+        # Assert：黑-A 属对手队被跳过 → 1 球员 + 1 队 = 2 条命令，每 filter 只调一次
         assert rc == 0
-        assert len(run_recorder) == 4
+        assert len(run_recorder) == 2
         for cmd, _env in run_recorder:
             assert str(REL / "merged_goals_cli.json") in cmd
         # 合并文件已写盘：两批各 2 confirmed+1 rejected 逐字拼接 + session 字段
@@ -1486,7 +1565,7 @@ class TestBuildMultiBatch:
                 "confirmed": True,
                 "players": [
                     {"tag": "红-7", "name": "", "team": "主队"},
-                    {"tag": "黑-A", "name": "", "team": "对手"},
+                    {"tag": "黑-A", "name": "", "team": "客队"},
                 ],
                 "assignments": {
                     format_key("f0.mp4", 0.5): "红-7",
@@ -1497,7 +1576,7 @@ class TestBuildMultiBatch:
         caplog.set_level(logging.WARNING)
         # Act
         rc = video.main(["build", "--session", SESSION, "--rawdir", str(rawdir), "--all"])
-        # Assert：只出 红-7 + 主队；黑-A 与 对手 零命中跳过（WARNING）
+        # Assert：只出 红-7 + 主队；黑-A 与 客队 零命中跳过（WARNING）
         assert rc == 0
         tail = [c[0][-2:] for c in run_recorder]
         assert tail == [["--scorer", "红-7"], ["--team", "主队"]]

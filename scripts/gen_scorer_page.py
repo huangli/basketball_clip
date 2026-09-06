@@ -59,7 +59,7 @@ from typing import TYPE_CHECKING, Any
 
 from errors import BasketballPipelineError, SchemaError
 from pipe_common import configure_logging, new_run_id, read_json
-from roster import Player, format_key, player_from_dict, validate_roster
+from roster import Player, format_key, opponent_of, player_from_dict, validate_roster
 from team_config import DEFAULT_OPPONENT, TeamConfig, load_team_config
 
 if TYPE_CHECKING:
@@ -1016,23 +1016,6 @@ show(start >= 0 ? start : 0);
 </body>
 </html>
 """
-
-
-def opponent_of(session: str) -> str:
-    """对手队名 = 场次 ID 第一个 ``_`` 后的后缀（场次 ID 约定 YYYYMMDD_对手名）。
-
-    无后缀 / 后缀空白 → 回退 OPPONENT_FALLBACK（通用默认"对手"）。
-
-    Args:
-        session: 场次 ID，如 ``20260801_对手名``。
-
-    Returns:
-        对手队名（黑/蓝球衣标签的 team 值）。
-    """
-    parts = session.strip().split("_", 1)
-    if len(parts) == 2 and parts[1].strip():
-        return parts[1].strip()
-    return OPPONENT_FALLBACK
 
 
 def team_of_tag(tag: str, opp: str, home: str) -> str:

@@ -6,10 +6,23 @@ format_key 双端一致性（4.1234→"4.1"）、fid_of 去扩展名、resolve_s
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 from errors import SchemaError
-from roster import Player, Roster, fid_of, format_key, resolve_scorer, validate_roster
+from roster import (
+    OPPONENT_TAG,
+    Player,
+    Roster,
+    fid_of,
+    format_key,
+    is_opponent_tag,
+    opponent_of,
+    opponent_team_name,
+    resolve_scorer,
+    validate_roster,
+)
 
 _PATH = "work/20260722/roster.json"
 
@@ -196,3 +209,67 @@ class TestResolveScorer:
     def test_empty_name_not_matched(self) -> None:
         # Arrange：name 为空串的 player 不应被空查询命中
         assert resolve_scorer(self._roster(), "") is None
+
+
+class TestOpponentTag:
+    """伪球员"对手"常量与判别。"""
+
+    def test_opponent_tag_constant(self) -> None:
+        assert OPPONENT_TAG == "对手"
+
+    def test_is_opponent_tag(self) -> None:
+        assert is_opponent_tag("对手") is True
+        assert is_opponent_tag("红-7") is False
+        assert is_opponent_tag("") is False
+
+
+class TestOpponentOf:
+    """对手队名按场次 ID 后缀派生。"""
+
+    def test_suffix_after_underscore(self) -> None:
+        assert opponent_of("20260805_对手队") == "对手队"
+
+    def test_no_suffix_fallback(self) -> None:
+        assert opponent_of("20260722") == "对手"
+
+    def test_empty_suffix_fallback(self) -> None:
+        assert opponent_of("20260722_") == "对手"
+
+    def test_whitespace_trimmed(self) -> None:
+        assert opponent_of(" 20260722_ 湖人 ") == "湖人"
+
+
+class TestOpponentTeamName:
+    """opponent_team_name：优先 team_config.json，缺省按场次 ID 派生。"""
+
+    def test_config_opponent_wins(self, tmp_path: pathlib.Path) -> None:
+        session_dir = tmp_path / "work" / "20260801_X"
+        session_dir.mkdir(parents=True)
+        (session_dir / "team_config.json").write_text(
+            '{"version": 1, "team_name": "主队", "opponent": "湖人"}',
+            encoding="utf-8",
+        )
+        assert opponent_team_name(session_dir) == "湖人"
+
+    def test_derive_from_session_id(self, tmp_path: pathlib.Path) -> None:
+        session_dir = tmp_path / "work" / "20260801_勇士"
+        session_dir.mkdir(parents=True)
+        assert opponent_team_name(session_dir) == "勇士"
+
+    def test_fallback_when_no_suffix_and_no_config(self, tmp_path: pathlib.Path) -> None:
+        session_dir = tmp_path / "work" / "20260801"
+        session_dir.mkdir(parents=True)
+        assert opponent_team_name(session_dir) == "对手"
+
+
+class TestOpponentRosterValidation:
+    """伪球员"对手"可正常通过 schema 校验。"""
+
+    def test_opponent_pseudo_player_valid(self) -> None:
+        data = _roster_data(
+            players=[_player(tag="对手", team="对手")],
+            assignments={"a.mp4#4.1": "对手"},
+        )
+        roster = validate_roster(data, _PATH)
+        assert roster.players[0].tag == "对手"
+        assert roster.players[0].team == "对手"

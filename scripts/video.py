@@ -42,7 +42,12 @@ from typing import Any
 
 from errors import BasketballPipelineError, SchemaError
 from pipe_common import atomic_write_json, configure_logging, new_run_id, read_json
-from roster import format_key, validate_roster
+from roster import (
+    format_key,
+    is_opponent_tag,
+    opponent_team_name,
+    validate_roster,
+)
 from team_config import load_team_config
 
 logger = logging.getLogger(__name__)
@@ -867,6 +872,8 @@ def _build_expand_all(session_dir: Path, known_keys: set[str]) -> list[tuple[str
     单点空组合中止整轮；2026-08-15 用户实测黑后卫零球批次中止事故）。
     便服队不入分队合集（build_highlight 拒收），跳过并记 WARNING；
     便服球员个人合集有命中才出。
+    对手队默认过滤：--all 不出 tag="对手" 的个人合集，也不出对手队的分队合集
+    （docs/opponent-filter/spec.md T1）；显式 --team/--scorer 对手保留通道。
 
     Args:
         session_dir: work/<场次> 目录。
@@ -887,18 +894,32 @@ def _build_expand_all(session_dir: Path, known_keys: set[str]) -> list[tuple[str
     for key, tag in roster.assignments.items():
         tag_keys.setdefault(tag, set()).add(key)
     hit_tags: set[str] = {t for t, ks in tag_keys.items() if ks & known_keys}
+    opponent_team: str = opponent_team_name(session_dir)
     pairs: list[tuple[str, str]] = []
     for p in roster.players:
+        if is_opponent_tag(p.tag) or p.team == opponent_team:
+            logger.warning(
+                "--all 跳过对手球员: %s (team=%s)，默认产物不含对手进球",
+                p.tag,
+                p.team,
+            )
+            continue
         if p.tag not in hit_tags:
             logger.warning("--all 跳过零命中球员: %s（选定批次内无归属球）", p.tag)
             continue
         pairs.append(("--scorer", p.tag))
     teams: list[str] = []
     casual_skipped: bool = False
+    opponent_team_skipped: bool = False
     warned_teams: set[str] = set()  # 零命中队伍只 WARNING 一次（不进 teams 去重失效）
     for p in roster.players:
         if p.team == CASUAL_TEAM:
             casual_skipped = True
+            continue
+        if p.team == opponent_team:
+            if not opponent_team_skipped:
+                logger.warning("--all 跳过对手队分队合集: %s，默认产物不含对手进球", opponent_team)
+                opponent_team_skipped = True
             continue
         if not p.team or p.team in teams or p.team in warned_teams:
             continue

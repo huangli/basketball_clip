@@ -43,13 +43,12 @@ from gen_scorer_page import (
     match_players_by_name,
     match_players_by_number,
     merge_assignments,
-    opponent_of,
     parse_players,
     resolve_photo_guesses,
     team_of_tag,
 )
 from photo_match_scorers import MATCH_VERSION, MatchEntry
-from roster import Player, format_key
+from roster import Player, format_key, opponent_of
 
 
 def _goal(file: str = "a.mp4", anchor: float = 4.1) -> dict:
