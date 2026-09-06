@@ -896,17 +896,67 @@ function renderScorerLinks(container) {
 
 // 第 6 步：出合集
 function renderBuildStep(container) {
-  stepHeader(container, "第 6 步：出合集", "把确认的进球合成集锦视频（默认出全部：队伍集锦 + 个人合集）。");
+  stepHeader(container, "第 6 步：出合集", "把确认的进球合成集锦视频（默认只出我方合集，对手进球自动过滤）。");
+
+  // opponent-filter T3：我方合集为默认主按钮；队名取 team_config（缺省"主队"同 B-2 默认口径）
+  var tc = (state.status && state.status.team_config) || null;
+  var homeName = tc && tc.team_name ? tc.team_name : "主队";
+  var hasRoster = !!(state.status && state.status.roster && state.status.roster.exists);
+
+  var homeBtn = el("button", "btn", "出我方合集（" + homeName + "）");
+  homeBtn.title = hasRoster
+    ? "只含我方队伍进球，对手进球自动过滤"
+    : "请先完成认人（第 5 步）";
+  homeBtn.disabled = !hasRoster;
+  var allBtn = el("button", "btn btn-secondary", "出全部合集");
+  allBtn.title = "我方每人个人合集 + 队伍集锦（对手进球仍自动过滤）";
+  var row0 = el("div", "button-row");
+  row0.appendChild(homeBtn);
+  row0.appendChild(allBtn);
+  container.appendChild(row0);
+
+  homeBtn.addEventListener("click", function () {
+    runTask(
+      "build",
+      taskBox,
+      function () {
+        return postJson("/api/sessions/" + encodeURIComponent(state.session) + "/build", {
+          all: false,
+          scorer: "",
+          team: homeName
+        });
+      },
+      function (ok) {
+        if (ok) refreshStatus();
+      }
+    );
+  });
+  allBtn.addEventListener("click", function () {
+    runTask(
+      "build",
+      taskBox,
+      function () {
+        return postJson("/api/sessions/" + encodeURIComponent(state.session) + "/build", {
+          all: true,
+          scorer: "",
+          team: ""
+        });
+      },
+      function (ok) {
+        if (ok) refreshStatus();
+      }
+    );
+  });
 
   var adv = el("details", "advanced");
-  adv.appendChild(el("summary", null, "高级选项：只出某一个人 / 某一个队"));
+  adv.appendChild(el("summary", null, "高级选项：只出某一个人 / 某一个队（含对手队）"));
   var scorerInput = textInput("", "进球者姓名/标签（与队名过滤二选一）");
-  var teamInput = textInput("", "队名（与进球者过滤二选一）");
+  var teamInput = textInput("", "队名（与进球者过滤二选一；填对手队名可单独出对手合集）");
   addField(adv, "只出该进球者", scorerInput);
   addField(adv, "只出该队伍", teamInput);
   container.appendChild(adv);
 
-  var startBtn = el("button", "btn", "开始合成");
+  var startBtn = el("button", "btn", "按高级选项合成");
   var row = el("div", "button-row");
   row.appendChild(startBtn);
   container.appendChild(row);
@@ -919,11 +969,15 @@ function renderBuildStep(container) {
   startBtn.addEventListener("click", function () {
     var scorer = scorerInput.value.trim();
     var team = teamInput.value.trim();
-    if (scorer && team) {
-      toast("进球者和队伍过滤只能填一个（都不填 = 出全部）", "error");
+    if (!scorer && !team) {
+      toast("高级选项需填进球者或队名（直接用上方按钮更方便）", "error");
       return;
     }
-    var body = { all: !(scorer || team), scorer: scorer, team: team };
+    if (scorer && team) {
+      toast("进球者和队伍过滤只能填一个", "error");
+      return;
+    }
+    var body = { all: false, scorer: scorer, team: team };
     runTask(
       "build",
       taskBox,
