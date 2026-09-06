@@ -2101,3 +2101,67 @@ class TestTrackPropagatePageJs:
             [node, "--check", str(js_path)], capture_output=True, text=True, check=False
         )
         assert proc.returncode == 0, proc.stderr
+
+
+class TestOpponentTag:
+    """opponent-filter T2：伪球员"对手"注入页面、teamOfTag 两端特判、
+    逐球标为对手/撤销按钮、整簇按钮随 PLAYERS 循环、导出零引用剔除。"""
+
+    def test_pseudo_player_injected_with_effective_opp_team(self) -> None:
+        # Arrange / Act
+        html = build_html([], [], "s", {}, {}, "闪电队", "主队")
+        # Assert：伪球员注入 PLAYERS 且 team=有效对手名；OPP_TAG 常量注入
+        assert '"tag": "对手"' in html
+        assert '"name": ""' in html
+        assert '"team": "闪电队"' in html
+        assert 'const OPP_TAG = "对手";' in html
+
+    def test_pseudo_player_not_duplicated_when_user_defined(self) -> None:
+        # Arrange：用户名单已自带"对手"标签
+        players = [Player(tag="对手", name="对面", team="闪电队")]
+        # Act
+        html = build_html([], players, "s", {}, {}, "闪电队", "主队")
+        # Assert：不重复注入（用户定义优先）
+        assert html.count('"tag": "对手"') == 1
+        assert '"name": "对面"' in html
+
+    def test_team_of_tag_guard_both_ends(self) -> None:
+        # Arrange / Act
+        html = build_html([], [], "s", {}, {}, "闪电队", "主队")
+        # Assert：JS 端特判（不走黑/蓝/白前缀推队，防误判便服）；Python 端同规则
+        assert "if (tag === OPP_TAG) return OPP;" in html
+        assert team_of_tag("对手", "闪电队", "主队") == "闪电队"
+
+    def test_oppmark_button_toggle(self) -> None:
+        # Arrange / Act
+        html = build_html([], [], "s", {}, {}, "对手", "主队")
+        # Assert：逐球按钮 + 已标后可撤销（unassign 删 marks/touched）
+        assert 'id="oppmark"' in html
+        assert "标为对手" in html
+        assert "撤销对手标记" in html
+        start = html.index("function unassign()")
+        body = html[start : html.index("function exportRoster", start)]
+        assert "delete marks[key];" in body
+        assert "delete touched[key];" in body
+
+    def test_export_filters_unused_pseudo_player(self) -> None:
+        # Arrange / Act
+        html = build_html([], [], "s", {}, {}, "对手", "主队")
+        # Assert：导出 roster 时伪球员零引用不进 players（有引用才保留）
+        start = html.index("function exportRoster")
+        body = html[start : html.index("function acceptAllPrefills", start)]
+        assert "used.has(OPP_TAG)" in body
+
+    def test_oppmark_js_syntax_node_check(self, tmp_path: pathlib.Path) -> None:
+        # node 不在 PATH 则跳过（沿用现有同款模式）
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node 不在 PATH")
+        html = build_html([], [], "s", {}, {}, "对手", "主队")
+        script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+        js_path = tmp_path / "page.js"
+        js_path.write_text(script, encoding="utf-8")
+        proc = subprocess.run(  # noqa: S603 node 路径来自 shutil.which，可信
+            [node, "--check", str(js_path)], capture_output=True, text=True, check=False
+        )
+        assert proc.returncode == 0, proc.stderr

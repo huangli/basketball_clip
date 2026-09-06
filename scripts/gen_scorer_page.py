@@ -59,7 +59,14 @@ from typing import TYPE_CHECKING, Any
 
 from errors import BasketballPipelineError, SchemaError
 from pipe_common import configure_logging, new_run_id, read_json
-from roster import Player, format_key, opponent_of, player_from_dict, validate_roster
+from roster import (
+    OPPONENT_TAG,
+    Player,
+    format_key,
+    opponent_of,
+    player_from_dict,
+    validate_roster,
+)
 from team_config import DEFAULT_OPPONENT, TeamConfig, load_team_config
 
 if TYPE_CHECKING:
@@ -165,6 +172,7 @@ small { color: #999; }
   <input id="free" placeholder="自由输入标签"><button id="go">归属 (回车)</button>
   <button id="accept" style="display:none"></button>
   <button id="photoaccept" style="display:none"></button>
+  <button id="oppmark" class="team-opp" title="该球是对手进的：一键归属对手">标为对手</button>
   <button id="acceptall"
     title="对所有号码/照片预填无歧义且未手改的球批量预填归属（不标已核，第三步可翻检）"
   >接受全部号码预填</button>
@@ -195,6 +203,7 @@ const EXPLAYERS = __EXPLAYERS__;
 const CLUSTERS = __CLUSTERS__;
 const SESSION = "__SESSION__";
 const OPP = __OPP__;
+const OPP_TAG = __OPP_TAG__;  // 伪球员"对手"标签（opponent-filter T2；roster.py OPPONENT_TAG 注入）
 const HOME = __HOME__;
 const LSKEY = "scorer_" + SESSION;
 const POSKEY = LSKEY + "_pos";
@@ -448,6 +457,7 @@ function save() {
 }
 function teamOfTag(tag) {
   // 与 Python 端 team_of_tag 同规则：标签前缀定队，黑/蓝→对手队（OPP），白→主队（HOME），其余便服
+  if (tag === OPP_TAG) return OPP;  // 伪球员"对手"特判：固定对手队，不落便服
   if (tag.startsWith("黑") || tag.startsWith("蓝")) return OPP;
   if (tag.startsWith("白")) return HOME;
   return "便服";
@@ -845,6 +855,15 @@ function show(i) {
     pgb.style.display = "none";
     pgb.onclick = null;
   }
+  // 标为对手（opponent-filter T2）：一键归属伪球员；已标则变为撤销
+  const ob = document.getElementById("oppmark");
+  if (marks[it.key] === OPP_TAG) {
+    ob.textContent = "撤销对手标记";
+    ob.onclick = () => unassign();
+  } else {
+    ob.textContent = "标为对手";
+    ob.onclick = () => assign(OPP_TAG);
+  }
   document.getElementById("prog").textContent = info;
   document.getElementById("cur").textContent =
     marks[it.key] ? "当前归属: " + marks[it.key] : "未归属";
@@ -904,6 +923,16 @@ function jumpUnassigned() {
   // 跳到未归属 = 切到未归属核对对象（spec 手工清单：两者一致）
   reviewTarget("__none__");
 }
+function unassign() {
+  // 撤销归属（opponent-filter T2 配套）：删 marks/touched 回未归属，位置不动
+  const vis = visible();
+  if (!vis.length) return;
+  const key = vis[cur].key;
+  delete marks[key];
+  delete touched[key];
+  save();
+  show(cur);
+}
 function exportRoster() {
   // assignments 并集 = 已有 roster 归属 + 本页全部标记（键即 candidates 的
   // format_key 产物，两端共用 roster.py 契约，此处不再拼键）
@@ -912,7 +941,10 @@ function exportRoster() {
   for (const [k, t] of Object.entries(marks)) { if (t && t !== NOGOAL) assignments[k] = t; }
   // players 以本页名单为准；归属到名单外标签（自由输入）的自动补录，
   // 名字/队别优先沿用已有 roster 记录，否则按标签前缀推队
-  const players = PLAYERS.map(p => ({ tag: p.tag, name: p.name, team: p.team }));
+  // 伪球员"对手"零引用剔除：没标过对手球的场次，roster.players 不带它（保持干净）
+  const used = new Set(Object.values(assignments));
+  const players = PLAYERS.filter(p => p.tag !== OPP_TAG || used.has(OPP_TAG))
+    .map(p => ({ tag: p.tag, name: p.name, team: p.team }));
   const known = new Set(players.map(p => p.tag));
   for (const t of new Set(Object.values(assignments))) {
     if (known.has(t)) continue;
@@ -1032,6 +1064,9 @@ def team_of_tag(tag: str, opp: str, home: str) -> str:
     Returns:
         opp / home / "便服"。
     """
+    if tag == OPPONENT_TAG:
+        # 伪球员"对手"固定对手队（opponent-filter T2，特判先于前缀推队，防落便服）
+        return opp
     for prefix, side in _TEAM_PREFIXES:
         if tag.startswith(prefix):
             return opp if side == "opp" else home
@@ -1733,8 +1768,13 @@ def build_html(
     Returns:
         scorer.html 全文。
     """
+    page_players: list[Player] = list(players)
+    if OPPONENT_TAG not in {p.tag for p in page_players}:
+        # 伪球员"对手"恒注入（opponent-filter T2）：随 OPP 队行渲染出按钮，
+        # 逐球/整簇一键归属；导出时零引用由 JS 侧剔除，不进 roster.players
+        page_players.append(Player(tag=OPPONENT_TAG, name="", team=opp))
     players_json = json.dumps(
-        [{"tag": p.tag, "name": p.name, "team": p.team} for p in players],
+        [{"tag": p.tag, "name": p.name, "team": p.team} for p in page_players],
         ensure_ascii=False,
     )
     explayers_json = json.dumps(
@@ -1749,6 +1789,7 @@ def build_html(
         .replace("__CLUSTERS__", json.dumps(clusters or [], ensure_ascii=False))
         .replace("__SESSION__", session)
         .replace("__OPP__", json.dumps(opp, ensure_ascii=False))
+        .replace("__OPP_TAG__", json.dumps(OPPONENT_TAG, ensure_ascii=False))
         .replace("__HOME__", json.dumps(home, ensure_ascii=False))
     )
 
