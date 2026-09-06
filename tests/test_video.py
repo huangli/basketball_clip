@@ -66,12 +66,16 @@ def run_recorder(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], dict[
     calls: list[tuple[list[str], dict[str, str]]] = []
 
     def fake_run(
-        cmd: list[str], *, check: bool, env: dict[str, str]
+        cmd: list[str], *, check: bool, env: dict[str, str], **_kwargs: object
     ) -> subprocess.CompletedProcess[str]:
         calls.append((list(cmd), dict(env)))
         return subprocess.CompletedProcess(cmd, 0)
 
+    def fake_check_output(_cmd: object, **_kwargs: object) -> str:
+        return "Microsoft Windows [Version 10.0.19045.4780]\n"
+
     monkeypatch.setattr(video.subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "check_output", fake_check_output)
     return calls
 
 

@@ -899,7 +899,7 @@ def _build_expand_all(session_dir: Path, known_keys: set[str]) -> list[tuple[str
     for p in roster.players:
         if is_opponent_tag(p.tag) or p.team == opponent_team:
             logger.warning(
-                "--all 跳过对手球员: %s (team=%s)，默认产物不含对手进球",
+                "--all 跳过对手队球员: %s (team=%s)，默认产物不含对手进球",
                 p.tag,
                 p.team,
             )
