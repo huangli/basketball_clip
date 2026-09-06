@@ -2,8 +2,9 @@
 """生成候选审核视频（供用户人工标注 进球/非进球）。
 
 读取 candidates.json，先把同一文件的候选聚类为"事件"（同一进球常触发多个
-候选，重叠片段重复观看浪费审核时间；规则见 cluster_candidates：纯时间链
-+时空放宽双条件），每个事件只出一个片段：覆盖 [首候选-2s, 末候选+2s]，
+候选，重叠片段重复观看浪费审核时间；规则见 cluster_candidates：时间链加
+空间约束（筐位优先，缺筐退球位）+ 时空放宽 + 时长上限三条件），每个事件
+只出一个片段：覆盖 [首候选-2s, 末候选+2s]，
 缩放 840x840 并烧录事件编号水印，按文件拼成一个审核 mp4。事件锚点取末
 成员 t0（见 event_anchor，批次 1 实证 max-conf 锚点在长事件切错时段）。
 裁剪：--hoops 提供筐轨迹时按轨迹包围盒自适应（全程见筐），否则回退 conf
@@ -45,12 +46,20 @@ RAW_GLOB: str = (
 )
 OUT_DIR: str = "work/review"
 
-CLUSTER_GAP_SEC: float = 2.0  # 候选间隔 <= 该值归为同一事件（同进球触发候选实测间隔 <=1.7s）
-# 时空放宽合并：间隔 <=6.0s 且球位 (cx,cy) 距离 <=400px(img 系) 也归同一事件——
-# 批次 1 实测 190354 同一进球两候选间隔 2.6s/309px 被纯时间链拆成两事件、合集重复；
-# 篮板补篮类真动作间隔虽可能 >2s，锚点取末成员后仍正确
+CLUSTER_GAP_SEC: float = 2.0  # 候选间隔 <= 该值且关联位置距离 <= CLUSTER_CHAIN_DIST 归为同一事件
+# 时空放宽合并：间隔 <=6.0s 且关联位置（筐位优先，缺筐退球位）距离 <=400px(img 系)
+# 也归同一事件——批次 1 实测 190354 同一进球两候选间隔 2.6s/309px 被纯时间链拆成
+# 两事件、合集重复；篮板补篮类真动作间隔虽可能 >2s，锚点取末成员后仍正确
 CLUSTER_MERGE_GAP_SEC: float = 6.0
 CLUSTER_MERGE_DIST: float = 400.0
+# 纯时间链的空间约束（2026-09-06 event-split）：相邻候选关联位置距离上限——
+# 关联位置 = 两候选各自时刻的最近筐位（hoops），任一缺筐该对退回球位。
+# 换场地筐位差大半个画面（实测 830~1571px）>> 800px，同回合镜头微动 << 800px；
+# 初值待小样验证定稿（spec O1）
+CLUSTER_CHAIN_DIST: float = 800.0
+# 事件时长上限：首末候选跨度超该值强制切段（一次进攻含补篮通常 <=15s，
+# 超长必是多回合链；第六人场次实测旧逻辑产出 9 个 >20s 事件）
+CLUSTER_MAX_EVENT_SEC: float = 20.0
 CLIP_BEFORE_SEC: float = 2.0  # 片段起点：事件首候选前
 CLIP_AFTER_SEC: float = (
     4.0  # 片段终点：事件末候选后（批次 2 用户反馈：+2s 时补篮/筐沿跳舞类结局未含，+4s 覆盖）
@@ -258,27 +267,58 @@ def _render_segments(segs: list[tuple[str, float, float]], vf: str, out_path: st
     _concat_parts(parts, out_path)
 
 
+def _hoop_pos_at(events: list[dict[str, Any]] | None, t0: float) -> tuple[float, float] | None:
+    """候选时刻的关联筐位：window 含 t0 的筐轨迹内 sec 最近点（img 系）。
+
+    Args:
+        events: 该 fid 的 hoops.json 事件列表；None/空表示无筐数据。
+        t0: 候选时刻（秒）。
+
+    Returns:
+        (cx, cy) img 系；无命中返回 None。
+    """
+    if not events:
+        return None
+    track: list[list[Any]] | None = find_event_track(events, t0)
+    if not track:
+        return None
+    pt: list[Any] = min(track, key=lambda p: abs(p[0] - t0))
+    return (float(pt[1]), float(pt[2]))
+
+
 def cluster_candidates(
     cands: list[dict[str, Any]],
     *,
     gap_sec: float = CLUSTER_GAP_SEC,
     merge_gap_sec: float = CLUSTER_MERGE_GAP_SEC,
     merge_dist: float = CLUSTER_MERGE_DIST,
+    chain_dist: float = CLUSTER_CHAIN_DIST,
+    max_event_sec: float = CLUSTER_MAX_EVENT_SEC,
+    hoop_events: list[dict[str, Any]] | None = None,
 ) -> list[list[dict[str, Any]]]:
-    """把候选聚类为事件（纯时间链 + 时空放宽双条件，满足任一即同事件）。
+    """把候选聚类为事件（时间链加空间约束 + 时空放宽 + 时长上限）。
 
     相邻候选（与当前事件末成员比较）满足以下任一即归入同一事件：
 
-    - 时间：t0 差 <= gap_sec（现状行为，同进球触发候选实测间隔 <=1.7s）；
-    - 时空：t0 差 <= merge_gap_sec 且 (cx,cy) 欧氏距离 <= merge_dist——
-      消 190354 式同球重复（实测同一进球两候选间隔 2.6s/309px 被纯时间链
-      拆成两事件）；篮板补篮类真动作锚点取末成员后仍正确。
+    - 时间链：t0 差 <= gap_sec 且关联位置距离 <= chain_dist；
+    - 时空：t0 差 <= merge_gap_sec 且关联位置距离 <= merge_dist——
+      补篮放宽（实证依据 190354：同球间隔 2.6s/309px），阈值不动。
+
+    关联位置 = 两候选各自时刻的最近筐位（hoops），任缺一筐该对退回球位
+    （逐对退回）。换场地筐位差大半个画面（第六人场次实测 830~1571px）
+    >> 阈值，跨场地合并由此切断；同回合/补篮两候选筐位同源，距离 ≈0 不误切。
+
+    时长上限：并入会使事件首末候选跨度 > max_event_sec 时强制切段
+    （一次进攻含补篮通常 <=15s，超长必是多回合链）。
 
     Args:
         cands: 候选列表（任意顺序，须含 t0/cx/cy 字段）。
         gap_sec: 纯时间链合并的 t0 差上限（秒）。
         merge_gap_sec: 时空放宽合并的 t0 差上限（秒）。
         merge_dist: 时空放宽合并的球位距离上限（img 系像素）。
+        chain_dist: 纯时间链的关联位置距离上限（img 系像素）。
+        max_event_sec: 事件首末候选跨度上限（秒）。
+        hoop_events: 该 fid 的 hoops.json 事件列表；缺省/空表示纯球位。
 
     Returns:
         事件列表，每个事件是候选列表（按 t0 升序）。
@@ -288,8 +328,18 @@ def cluster_candidates(
         if clusters:
             prev: dict[str, Any] = clusters[-1][-1]
             gap: float = c["t0"] - prev["t0"]
-            dist: float = math.hypot(c["cx"] - prev["cx"], c["cy"] - prev["cy"])
-            if gap <= gap_sec or (gap <= merge_gap_sec and dist <= merge_dist):
+            span: float = c["t0"] - clusters[-1][0]["t0"]
+            pa: tuple[float, float] | None = _hoop_pos_at(hoop_events, prev["t0"])
+            pb: tuple[float, float] | None = _hoop_pos_at(hoop_events, c["t0"])
+            dist: float = (
+                math.hypot(pb[0] - pa[0], pb[1] - pa[1])
+                if pa is not None and pb is not None
+                else math.hypot(c["cx"] - prev["cx"], c["cy"] - prev["cy"])
+            )
+            if span <= max_event_sec and (
+                (gap <= gap_sec and dist <= chain_dist)
+                or (gap <= merge_gap_sec and dist <= merge_dist)
+            ):
                 clusters[-1].append(c)
                 continue
         clusters.append([c])
@@ -803,7 +853,8 @@ def main() -> int:
                 missing.append(fid)
                 continue
             clusters: list[list[dict[str, Any]]] = cluster_candidates(
-                [r for r in records if r["fid"] == fid]
+                [r for r in records if r["fid"] == fid],
+                hoop_events=hoops_by_fid.get(fid, []),
             )
             t_start: float = time.time()
             clips: list[str] = []

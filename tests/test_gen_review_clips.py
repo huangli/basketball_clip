@@ -203,8 +203,29 @@ def test_cluster_beyond_merge_gap_not_merged() -> None:
     assert len(cluster_candidates(cands)) == 2
 
 
-def test_cluster_pure_time_chain_unchanged() -> None:
-    # Arrange：间隔 <=2.0s 纯时间链行为不变（球位再远也链式合并）
+# ---- event-split：纯时间链加空间约束 + 事件时长上限 ----
+# 2026-09-06 立哥实测：审核片段多回合并一段、跨场地不切断。
+# 旧语义"间隔 <=2s 球位再远也并"即本次修复对象，新语义：纯时间链须同时满足
+# 关联位置（筐位优先，缺筐逐对退回球位）距离 <=800px，且事件跨度 <=20s。
+
+
+def test_cluster_chain_near_position_merges() -> None:
+    # Arrange：间隔 <=2s 且球位近（<=800px）→ 仍并入（同回合行为保持）
+    cands = [
+        _cand(t0=10.0, cx=100, cy=100),
+        _cand(t0=11.9, cx=400, cy=300),
+        _cand(t0=13.8, cx=600, cy=500),
+    ]
+    # Act
+    clusters = cluster_candidates(cands)
+    # Assert：3 候选链式合成 1 事件
+    assert len(clusters) == 1
+    assert len(clusters[0]) == 3
+
+
+def test_cluster_chain_far_ball_split() -> None:
+    # Arrange：间隔 <=2s 但无筐数据退回球位、球位差 >800px → 切断
+    # （旧 test_cluster_pure_time_chain_unchanged 的场景，新语义下必须切开）
     cands = [
         _cand(t0=10.0, cx=0, cy=0),
         _cand(t0=12.0, cx=1900, cy=1000),
@@ -212,9 +233,117 @@ def test_cluster_pure_time_chain_unchanged() -> None:
     ]
     # Act
     clusters = cluster_candidates(cands)
-    # Assert：3 候选链式合成 1 事件
+    # Assert：每对距离都 >800px，切成 3 事件
+    assert len(clusters) == 3
+
+
+def _two_hoop_events() -> list[dict[str, Any]]:
+    """构造两段筐事件：window [0,10.5] 筐位 (300,300) / window [10.5,100] 筐位 (1600,300)。"""
+    return [
+        {
+            "fid": "0011",
+            "window": [0.0, 10.5],
+            "detected": True,
+            "track": [[10.0, 300, 300, "det"]],
+        },
+        {
+            "fid": "0011",
+            "window": [10.5, 100.0],
+            "detected": True,
+            "track": [[60.0, 1600, 300, "det"]],
+        },
+    ]
+
+
+def test_cluster_chain_hoop_position_split_cross_court() -> None:
+    # Arrange：球位近（100px）但两候选各自时刻筐位差 1300px（换场地）→ 切断
+    cands = [_cand(t0=10.0, cx=100, cy=100), _cand(t0=11.0, cx=200, cy=100)]
+    # Act
+    clusters = cluster_candidates(cands, hoop_events=_two_hoop_events())
+    # Assert：筐位优先于球位，跨场地切开
+    assert len(clusters) == 2
+
+
+def test_cluster_chain_hoop_missing_pairwise_fallback() -> None:
+    # Arrange：一对中其一缺筐（t0=75.0 落在两 window 外）→ 该对退回球位比较
+    # t0=10.0 有筐；t0=11.0 有筐但属 window[50,100]？不——构造 t0=75 无命中
+    cands = [_cand(t0=10.0, cx=100, cy=100), _cand(t0=11.5, cx=250, cy=100)]
+    events = [
+        {
+            "fid": "0011",
+            "window": [0.0, 11.0],  # 只含 t0=10.0，t0=11.5 无筐
+            "detected": True,
+            "track": [[10.0, 300, 300, "det"]],
+        }
+    ]
+    # Act：逐对退回——任一缺筐该对用球位，球位差 150px <=800 → 并
+    clusters = cluster_candidates(cands, hoop_events=events)
+    # Assert
     assert len(clusters) == 1
-    assert len(clusters[0]) == 3
+
+
+def test_cluster_max_event_sec_force_split() -> None:
+    # Arrange：每步 gap<=2s 且球位近，可无限链；总跨度 21s > 20s 上限 → 强制切段
+    cands = [_cand(t0=float(t), cx=100, cy=100) for t in range(0, 23, 2)]
+    # Act
+    clusters = cluster_candidates(cands)
+    # Assert：t0=22 并入会使跨度 22-0=22 > 20，切为 2 事件
+    assert len(clusters) == 2
+    assert clusters[0][-1]["t0"] == 20.0
+    assert clusters[1][0]["t0"] == 22.0
+
+
+def test_cluster_max_event_sec_also_caps_merge_rule() -> None:
+    # Arrange：补篮时空放宽合并同样受 20s 上限约束（首候选 0s，链到 22s 后
+    # 又来一对 gap=5s/dist=100px 本可走 merge 规则并入，但跨度 27s 超限）
+    cands = [
+        _cand(t0=0.0, cx=100, cy=100),
+        _cand(t0=19.0, cx=150, cy=100),
+        _cand(t0=24.0, cx=200, cy=100),
+    ]
+    # Act / Assert：19->24 走 merge 规则本可并，但 24-0=24>20 → 切开
+    assert len(cluster_candidates(cands)) == 2
+
+
+def test_cluster_camera_pan_may_split_documented() -> None:
+    # Arrange：同一场地镜头大幅移动——同一 window 内筐轨迹 5s/7s 两点差 850px，
+    # t0=5.0 取最近点 (300,300)、t0=6.9 取最近点 (1150,300)，筐位差 850px > 800。
+    # 这是 800px 初值下的已知误切风险（spec O1），阈值调整时必须回看本用例。
+    events = [
+        {
+            "fid": "0011",
+            "window": [0.0, 20.0],
+            "detected": True,
+            "track": [[5.0, 300, 300, "det"], [7.0, 1150, 300, "det"]],
+        }
+    ]
+    cands = [_cand(t0=5.0, cx=300, cy=300), _cand(t0=6.9, cx=1000, cy=300)]
+    # Act / Assert：镜头大移动致筐位差超阈 → 切（锁定现状，非目标行为背书）
+    assert len(cluster_candidates(cands, hoop_events=events)) == 2
+
+
+def test_cluster_merge_rule_uses_hoop_position_split() -> None:
+    # Arrange：gap=3s(>2s) 走时空放宽规则，球位差 200px<=400 但两候选筐位差
+    # 1300px（换场地）→ 关联位置距离 >400 → 切断（跨场地必须切开，
+    # 实测跨场地对球位常 <400px，只看球位切不开）
+    cands = [_cand(t0=10.0, cx=100, cy=100), _cand(t0=13.0, cx=300, cy=100)]
+    # Act / Assert
+    assert len(cluster_candidates(cands, hoop_events=_two_hoop_events())) == 2
+
+
+def test_cluster_merge_rule_same_hoop_still_merges() -> None:
+    # Arrange：补篮回归——两候选筐位同源（同 track），gap=3s、球位 300px → 仍并
+    events = [
+        {
+            "fid": "0011",
+            "window": [0.0, 20.0],
+            "detected": True,
+            "track": [[10.0, 300, 300, "det"], [13.0, 320, 300, "det"]],
+        }
+    ]
+    cands = [_cand(t0=10.0, cx=100, cy=100), _cand(t0=13.0, cx=400, cy=100)]
+    # Act / Assert：筐位差 20px <= 400 → 并（阈值 6s/400px 不动，真同球不拆）
+    assert len(cluster_candidates(cands, hoop_events=events)) == 1
 
 
 # ---- 批次 2 改进 3：events_index 筐距 hoop_dist ----
