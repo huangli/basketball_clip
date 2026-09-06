@@ -176,6 +176,9 @@ small { color: #999; }
   <button id="acceptall"
     title="对所有号码/照片预填无歧义且未手改的球批量预填归属（不标已核，第三步可翻检）"
   >接受全部号码预填</button>
+  <button id="acceptopp" class="team-opp"
+    title="对所有球衣识别为黑色的球批量归属对手（不标已核，第三步可翻检；有误判请逐球改回）"
+  >接受全部对手预填</button>
   <button id="skip">跳过 (S)</button>
   <button id="nogoal">不算进球 (N)</button>
   <button class="nav" id="prev">← 上一个</button>
@@ -828,6 +831,7 @@ function show(i) {
     info += ` | ${it.prefill_note === "photo" ? "照片预填" : "号码预填"}:${it.prefill_tag}`;
   }
   else if (it.prefill_note === "ambiguous") info += " | 号码歧义(同号多人)";
+  else if (it.team_guess === "黑") info += " | 对手预填:黑";
   else if (it.team_guess) info += ` | 颜色预填:${it.team_guess}`;
   const ng = it.number_guess;
   if (ng && ng.number) info += ` (读号:${ng.color || ""}${ng.number})`;
@@ -861,7 +865,8 @@ function show(i) {
     ob.textContent = "撤销对手标记";
     ob.onclick = () => unassign();
   } else {
-    ob.textContent = "标为对手";
+    // 黑球衣候选球（opponent-prefill）：文案引导接受预填；非候选维持"标为对手"
+    ob.textContent = it.team_guess === "黑" ? "接受对手预填" : "标为对手";
     ob.onclick = () => assign(OPP_TAG);
   }
   document.getElementById("prog").textContent = info;
@@ -933,6 +938,23 @@ function unassign() {
   save();
   show(cur);
 }
+function acceptAllOpponent() {
+  // 一键全收对手预填（opponent-prefill）：仅 team_guess="黑"（黑球衣=对手色系）
+  // 且未归属、未手改的球写入 marks=OPP_TAG；不标 touched——预填非终裁，
+  // 第三步逐球核对可翻检改回。SKIP 球无裁图无 team_guess，天然不满足条件。
+  let n = 0, nTouched = 0;
+  for (const it of ITEMS) {
+    if (it.team_guess !== "黑") continue;
+    if (touched[it.key]) { nTouched++; continue; }
+    if (marks[it.key] === OPP_TAG) continue; // 幂等：已是对手不重复计数
+    if (marks[it.key]) continue;             // 已归属他队不覆盖（人手标过的不动）
+    marks[it.key] = OPP_TAG;
+    n++;
+  }
+  save();
+  show(cur);
+  alert("已接受 " + n + " 个对手预填（已手改/已归属 " + nTouched + " 跳过）");
+}
 function exportRoster() {
   // assignments 并集 = 已有 roster 归属 + 本页全部标记（键即 candidates 的
   // format_key 产物，两端共用 roster.py 契约，此处不再拼键）
@@ -993,6 +1015,7 @@ function acceptAllPrefills() {
 }
 document.getElementById("go").onclick = freeAssign;
 document.getElementById("acceptall").onclick = acceptAllPrefills;
+document.getElementById("acceptopp").onclick = acceptAllOpponent;
 document.getElementById("skip").onclick = skip;
 document.getElementById("nogoal").onclick = () => assign(NOGOAL);
 document.getElementById("prev").onclick = () => show(cur - 1);

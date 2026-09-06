@@ -2165,3 +2165,57 @@ class TestOpponentTag:
             [node, "--check", str(js_path)], capture_output=True, text=True, check=False
         )
         assert proc.returncode == 0, proc.stderr
+
+
+class TestOpponentPrefill:
+    """opponent-prefill：team_guess="黑" 自动出对手预填 + 一键全收（预填非终裁）。"""
+
+    def test_black_team_guess_shows_opponent_prefill_hint(self) -> None:
+        # Arrange / Act
+        html = build_html([], [], "s", {}, {}, "对手", "主队")
+        # Assert：黑→对手预填提示；白/便服仍走颜色预填（分支顺序：对手预填优先）
+        assert 'info += " | 对手预填:黑";' in html
+        start = html.index("对手预填:黑")
+        assert html.index("颜色预填:", start) > start
+
+    def test_oppmark_button_text_accept_prefill_for_black(self) -> None:
+        # Arrange / Act
+        html = build_html([], [], "s", {}, {}, "对手", "主队")
+        # Assert：黑候选球按钮文案变"接受对手预填"，非候选仍"标为对手"
+        assert 'it.team_guess === "黑"' in html
+        assert "接受对手预填" in html
+        assert "标为对手" in html
+
+    def test_accept_all_opponent_prefills_button(self) -> None:
+        # Arrange / Act
+        html = build_html([], [], "s", {}, {}, "对手", "主队")
+        # Assert：一键全收按钮 + 批量函数只写未归属未手改的黑候选球
+        assert 'id="acceptopp"' in html
+        assert "接受全部对手预填" in html
+        start = html.index("function acceptAllOpponent")
+        body = html[start : html.index("function exportRoster", start)]
+        assert 'it.team_guess !== "黑"' in body
+        assert "touched[it.key]" in body
+        assert "marks[it.key] = OPP_TAG;" in body
+
+    def test_prefill_not_written_to_marks_before_accept(self) -> None:
+        # Arrange / Act
+        html = build_html([], [], "s", {}, {}, "对手", "主队")
+        # Assert：预填只是提示——show() 的提示分支（到 number_guess 前）不写 marks
+        start = html.index("对手预填:黑")
+        end = html.index("const ng =", start)
+        assert "marks[" not in html[start:end]
+
+    def test_accept_all_opponent_js_syntax_node_check(self, tmp_path: pathlib.Path) -> None:
+        # node 不在 PATH 则跳过（沿用现有同款模式）
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node 不在 PATH")
+        html = build_html([], [], "s", {}, {}, "对手", "主队")
+        script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+        js_path = tmp_path / "page.js"
+        js_path.write_text(script, encoding="utf-8")
+        proc = subprocess.run(  # noqa: S603 node 路径来自 shutil.which，可信
+            [node, "--check", str(js_path)], capture_output=True, text=True, check=False
+        )
+        assert proc.returncode == 0, proc.stderr
