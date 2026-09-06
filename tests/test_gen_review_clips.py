@@ -265,8 +265,8 @@ def test_cluster_chain_hoop_position_split_cross_court() -> None:
 
 
 def test_cluster_chain_hoop_missing_pairwise_fallback() -> None:
-    # Arrange：一对中其一缺筐（t0=75.0 落在两 window 外）→ 该对退回球位比较
-    # t0=10.0 有筐；t0=11.0 有筐但属 window[50,100]？不——构造 t0=75 无命中
+    # Arrange：一对中其一缺筐（t0=11.5 落在 window 外）→ 该对退回球位比较
+    # t0=10.0 有筐；t0=11.5 无筐
     cands = [_cand(t0=10.0, cx=100, cy=100), _cand(t0=11.5, cx=250, cy=100)]
     events = [
         {

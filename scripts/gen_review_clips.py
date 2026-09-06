@@ -315,7 +315,7 @@ def cluster_candidates(
         cands: 候选列表（任意顺序，须含 t0/cx/cy 字段）。
         gap_sec: 纯时间链合并的 t0 差上限（秒）。
         merge_gap_sec: 时空放宽合并的 t0 差上限（秒）。
-        merge_dist: 时空放宽合并的球位距离上限（img 系像素）。
+        merge_dist: 时空放宽合并的关联位置距离上限（img 系像素）。
         chain_dist: 纯时间链的关联位置距离上限（img 系像素）。
         max_event_sec: 事件首末候选跨度上限（秒）。
         hoop_events: 该 fid 的 hoops.json 事件列表；缺省/空表示纯球位。
