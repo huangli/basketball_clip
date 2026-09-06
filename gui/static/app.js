@@ -395,6 +395,10 @@ function runTask(stepId, container, submitFn, onDone) {
 
 function followTask(taskId, ui, onTerminal) {
   var finished = false;
+  // 帧进度优先保持：本任务一旦见过 frame_progress，之后的 step 类事件
+  // （total_steps=null 的 score 任务会走"进度不可预估"分支）不再把已显示的
+  // "约 N%"打回 indeterminate 转圈
+  var seenFrameProgress = false;
   var source = new EventSource("/api/tasks/" + taskId + "/events");
 
   function terminate(ok, msg, tail) {
@@ -419,12 +423,17 @@ function followTask(taskId, ui, onTerminal) {
         break;
       case "step_start":
         appendLog(ui.logBox, "▶ 执行: " + ev.step);
-        updateProgress(ui, ev.step_index, ev.total_steps, ev.step);
+        if (!seenFrameProgress) {
+          updateProgress(ui, ev.step_index, ev.total_steps, ev.step);
+        }
         break;
       case "step_done":
-        updateProgress(ui, ev.step_index, ev.total_steps, ev.step + "（完成）");
+        if (!seenFrameProgress) {
+          updateProgress(ui, ev.step_index, ev.total_steps, ev.step + "（完成）");
+        }
         break;
       case "frame_progress":
+        seenFrameProgress = true;
         updateFrameProgress(ui, ev);
         break;
       case "step_failed":

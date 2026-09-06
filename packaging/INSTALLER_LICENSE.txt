@@ -1,4 +1,4 @@
-basketball-clip 许可声明
+﻿basketball-clip 许可声明
 ========================
 
 一、本项目主代码（MIT License）
@@ -33,6 +33,8 @@ SOFTWARE.
 2. ffmpeg / ffprobe：本安装包内嵌 BtbN FFmpeg 构建（GPL 版本，含 libx264/x265）。
    https://github.com/BtbN/FFmpeg-Builds
    许可文本随安装附带于安装目录 _internal\assets\ffmpeg\ 下。
+   按 GPL 义务，对应源代码可自 BtbN FFmpeg-Builds release 页获取：
+   https://github.com/BtbN/FFmpeg-Builds/releases
 
 3. CLIP 权重（open_clip ViT-B-32 / laion2b_s34b_b79k）：随包附带，
    源自 Hugging Face laion/CLIP-ViT-B-32-laion2B-s34B-b79K。

@@ -146,13 +146,13 @@ def dispatch_script(argv: list[str]) -> bool:
     if not script.is_absolute():
         script = (Path.cwd() / script).resolve()
     scripts_root = (app_dir() / SCRIPTS_DIR_NAME).resolve()
+    # 子进程 stdio 强制 UTF-8 必须在任何中文输出（含下方存在性检查的报错）之前：
+    # cp1252+backslashreplace 会把中文 print 全转义，runner 侧按 UTF-8 解码失配
+    reconfigure_stdio_utf8()
     if not script.is_relative_to(scripts_root) or not script.is_file():
         print(f"错误: 脚本不存在或不在 scripts/ 目录内: {script}", file=sys.stderr)  # noqa: T201
         raise SystemExit(2)
     bootstrap_env()  # 子进程同样要 ffmpeg PATH / CLIP 离线（env copy 之外的双保险）
-    # 子进程 stdio 强制 UTF-8 必须在 runpy 之前：脚本 print 的中文与进度协议
-    # 由 runner 按 UTF-8 解码，cp1252+backslashreplace 会全链乱码失配
-    reconfigure_stdio_utf8()
     sys.argv = [str(script), *argv[2:]]
     # scripts 内模块平级互 import（from errors import ...），目录前插 sys.path
     sys.path.insert(0, str(scripts_root))

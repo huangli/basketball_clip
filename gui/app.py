@@ -71,6 +71,9 @@ GOALS_BATCH_RE: re.Pattern[str] = re.compile(r"^goals_batch(\d+)\.json$")
 # 批次 candidates/review 命名（与 GOALS_BATCH_RE 同双轨契约，批次发现补充源）
 CANDIDATES_BATCH_RE: re.Pattern[str] = re.compile(r"^candidates_batch(\d+)\.json$")
 REVIEW_BATCH_RE: re.Pattern[str] = re.compile(r"^review_batch(\d+)$")
+# 已知非批次命名（run_session --fids adhoc 补跑产物等，不归批次双轨命名）：
+# 批次发现时静默跳过，不进"无法识别"WARNING（正常产物，非异常）
+NON_BATCH_LABELS: frozenset[str] = frozenset({"adhoc"})
 # 场次目录识别标记（work/ 下还有 detect/frames/.gui 等共享目录，靠标记物区分）
 SESSION_MARKERS: tuple[str, ...] = (
     "video_cli.json",
@@ -260,6 +263,8 @@ def _discover_batches(session_dir: Path) -> list[dict[str, Any]]:
         if name == "candidates.json":
             tracks.setdefault(1, "goals.json")
             continue
+        if name.removesuffix(".json").removeprefix("candidates_") in NON_BATCH_LABELS:
+            continue  # adhoc 等非批次产物：正常存在，静默跳过
         m = CANDIDATES_BATCH_RE.match(name)
         if m is None or int(m.group(1)) < 1:
             logger.warning("无法识别的 candidates 文件，跳过: %s", name)
@@ -273,6 +278,8 @@ def _discover_batches(session_dir: Path) -> list[dict[str, Any]]:
         if name == "review":
             tracks.setdefault(1, "goals.json")
             continue
+        if name.removeprefix("review_") in NON_BATCH_LABELS:
+            continue  # adhoc 等非批次产物：正常存在，静默跳过
         m = REVIEW_BATCH_RE.match(name)
         if m is None or int(m.group(1)) < 1:
             logger.warning("无法识别的 review 目录，跳过: %s", name)
