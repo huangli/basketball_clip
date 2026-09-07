@@ -85,6 +85,51 @@ SESSION_MARKERS: tuple[str, ...] = (
 # team_config.json 契约（B-2 schema v1；写侧本地实现，读侧容错归 scripts/team_config.py）
 TEAM_CONFIG_VERSION: int = 1
 TEAM_CONFIG_NAME: str = "team_config.json"
+# video.py 的场次状态文件名（srcdir 记忆的读侧来源）
+VIDEO_CLI_STATE_NAME: str = "video_cli.json"
+# GUI 自身状态（work/.gui/state.json）：last_srcdir 等跨启动记忆
+GUI_STATE_NAME: str = "state.json"
+
+
+def _read_gui_state(gui_dir: Path) -> dict[str, Any]:
+    """读 GUI 状态文件；缺失/损坏/结构非法 → 空 dict + WARNING（显式降级不炸）。"""
+    path: Path = gui_dir / GUI_STATE_NAME
+    if not path.is_file():
+        return {}
+    try:
+        data: Any = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        logger.warning("GUI 状态文件读取失败（按空状态降级）: %s (%s)", path, e)
+        return {}
+    if not isinstance(data, dict):
+        logger.warning("GUI 状态文件结构非法（按空状态降级）: %s", path)
+        return {}
+    return data
+
+
+def _write_gui_state(gui_dir: Path, state: dict[str, Any]) -> None:
+    """原子写 GUI 状态（tmp + os.replace）；写失败记 ERROR 不炸主流程。"""
+    try:
+        gui_dir.mkdir(parents=True, exist_ok=True)
+        tmp: Path = gui_dir / (GUI_STATE_NAME + ".tmp")
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, gui_dir / GUI_STATE_NAME)
+    except OSError as e:
+        logger.error("GUI 状态写入失败: %s (%s)", gui_dir, e, exc_info=True)
+
+
+def _read_cli_srcdir(session_dir: Path) -> str | None:
+    """从场次 video_cli.json 读 srcdir（GUI 预填素材目录用）；缺失/损坏 → None + WARNING。"""
+    path: Path = session_dir / VIDEO_CLI_STATE_NAME
+    if not path.is_file():
+        return None
+    try:
+        data: Any = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        logger.warning("video_cli.json 读取失败（srcdir 按未知处理）: %s (%s)", path, e)
+        return None
+    srcdir: Any = data.get("srcdir") if isinstance(data, dict) else None
+    return srcdir if isinstance(srcdir, str) and srcdir else None
 
 
 # ---- 请求体模型（pydantic 边界校验第一层） ----
@@ -479,7 +524,10 @@ def create_app(
 
     @app.post("/api/sessions/scan")
     def scan_sessions(body: ScanRequest) -> dict[str, Any]:
-        """递归扫素材目录 .mp4；推测场次 ID = 目录名（score 缺省口径同源）。"""
+        """递归扫素材目录 .mp4；推测场次 ID = 目录名（score 缺省口径同源）。
+
+        扫描成功即记忆 last_srcdir（gui-state-persist：下次启动预填，免重复输入）。
+        """
         src = _valid_srcdir(body.srcdir)
         try:
             files = sorted(
@@ -490,7 +538,17 @@ def create_app(
         except OSError as e:
             logger.error("素材目录扫描失败: %s (%s)", src, e, exc_info=True)
             _fail(500, f"素材目录扫描失败: {src}")
+        gui_state = _read_gui_state(work / ".gui")
+        gui_state["last_srcdir"] = str(src)
+        _write_gui_state(work / ".gui", gui_state)
         return {"files": files, "count": len(files), "session": src.name}
+
+    @app.get("/api/gui-state")
+    def gui_state() -> dict[str, Any]:
+        """GUI 跨启动记忆（当前仅 last_srcdir；缺失/损坏 → null 不报错）。"""
+        state: dict[str, Any] = _read_gui_state(work / ".gui")
+        last: Any = state.get("last_srcdir")
+        return {"last_srcdir": last if isinstance(last, str) and last else None}
 
     # ---- 场次清单与状态 ----
 
@@ -526,6 +584,7 @@ def create_app(
             "session": session,
             "stage": _session_stage(session_dir, output),
             "batches": _discover_batches(session_dir),
+            "srcdir": _read_cli_srcdir(session_dir),
             "roster": {"exists": confirmed is not None, "confirmed": confirmed},
             "photo_page": (
                 f"/pages/{session}/photos/photo_page.html" if photo_page.is_file() else None

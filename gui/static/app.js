@@ -52,6 +52,7 @@ var state = {
   teamSkipped: false, // 队名步骤点了「跳过」
   runningTask: null, // { taskId, stepId } 全局同刻只跑一个任务
   pendingTeamConfig: null, // 场次目录未建时的暂存队名 {team_name, opponent}
+  lastSrcdir: null, // 上次使用的素材目录（/api/gui-state 记忆，gui-state-persist）
 };
 
 // ---- DOM 小工具 ----
@@ -213,6 +214,8 @@ function resumeSession(session) {
   state.teamSkipped = false;
   refreshStatus().then(function (st) {
     if (!st) return;
+    // srcdir 记忆（gui-state-persist）：续接场次时预填该场次的素材目录
+    if (st.srcdir) state.srcdir = st.srcdir;
     var target = "source";
     for (var i = 0; i < STEPS.length; i++) {
       if (!stepDone(STEPS[i].id)) {
@@ -1086,9 +1089,19 @@ function init() {
   renderStep();
   refreshSessions();
   initDiagnostics();
+  // srcdir 记忆（gui-state-persist）：启动拉取上次素材目录，新场次也免重填
+  api("/api/gui-state")
+    .then(function (gs) {
+      if (gs && gs.last_srcdir) {
+        state.lastSrcdir = gs.last_srcdir;
+        if (!state.srcdir) state.srcdir = gs.last_srcdir;
+        if (state.currentStep === "source") renderStep();
+      }
+    })
+    .catch(function () {}); // 记忆拉取失败不打扰（页面照常，仅无预填）
   $("#btn-new-session").addEventListener("click", function () {
     state.session = null;
-    state.srcdir = "";
+    state.srcdir = state.lastSrcdir || "";
     state.status = null;
     state.scanResult = null;
     state.sessionDirty = false;

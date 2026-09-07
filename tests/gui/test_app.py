@@ -543,3 +543,68 @@ def test_index_placeholder(tmp_path: pathlib.Path) -> None:
     resp = client.get("/")
     assert resp.status_code == 200
     assert "basketball-clip" in resp.text
+
+
+# ---- GUI 状态持久化（srcdir 记忆，gui-state-persist）----
+
+
+def test_scan_persists_and_gui_state_returns_last_srcdir(tmp_path: pathlib.Path) -> None:
+    # Arrange / Act：扫描成功后，gui-state 应记住素材目录
+    client, _, _ = _make_client(tmp_path)
+    src = _make_srcdir(tmp_path)
+    resp = client.post("/api/sessions/scan", json={"srcdir": str(src)})
+    assert resp.status_code == 200
+    # Assert
+    resp2 = client.get("/api/gui-state")
+    assert resp2.status_code == 200
+    assert resp2.json()["last_srcdir"] == str(src)
+
+
+def test_gui_state_null_when_never_scanned(tmp_path: pathlib.Path) -> None:
+    # Arrange / Act
+    client, _, _ = _make_client(tmp_path)
+    resp = client.get("/api/gui-state")
+    # Assert：从未扫描 → null（不报错）
+    assert resp.status_code == 200
+    assert resp.json()["last_srcdir"] is None
+
+
+def test_gui_state_corrupt_returns_null_with_warning(tmp_path: pathlib.Path) -> None:
+    # Arrange：state.json 损坏
+    client, _, _ = _make_client(tmp_path)
+    gui_dir = tmp_path / "work" / ".gui"
+    gui_dir.mkdir(parents=True)
+    (gui_dir / "state.json").write_text("{坏json", encoding="utf-8")
+    # Act / Assert：显式降级为 null 而非 500
+    resp = client.get("/api/gui-state")
+    assert resp.status_code == 200
+    assert resp.json()["last_srcdir"] is None
+
+
+def test_status_includes_srcdir_from_video_cli(tmp_path: pathlib.Path) -> None:
+    # Arrange：场次目录带 video_cli.json（含 srcdir）+ candidates 标记
+    client, _, _ = _make_client(tmp_path)
+    session_dir = tmp_path / "work" / "20260801_测试队"
+    session_dir.mkdir(parents=True)
+    (session_dir / "candidates.json").write_text("[]", encoding="utf-8")
+    (session_dir / "video_cli.json").write_text(
+        json.dumps({"version": 1, "session": "20260801_测试队", "srcdir": "D:/素材/x", "runs": []}),
+        encoding="utf-8",
+    )
+    # Act
+    resp = client.get("/api/sessions/20260801_测试队/status")
+    # Assert
+    assert resp.status_code == 200
+    assert resp.json()["srcdir"] == "D:/素材/x"
+
+
+def test_status_srcdir_null_without_video_cli(tmp_path: pathlib.Path) -> None:
+    # Arrange：场次目录只有 candidates 标记，无 video_cli.json
+    client, _, _ = _make_client(tmp_path)
+    session_dir = tmp_path / "work" / "20260801_测试队"
+    session_dir.mkdir(parents=True)
+    (session_dir / "candidates.json").write_text("[]", encoding="utf-8")
+    # Act / Assert
+    resp = client.get("/api/sessions/20260801_测试队/status")
+    assert resp.status_code == 200
+    assert resp.json()["srcdir"] is None
