@@ -92,7 +92,7 @@ GUI_STATE_NAME: str = "state.json"
 
 
 def _read_gui_state(gui_dir: Path) -> dict[str, Any]:
-    """读 GUI 状态文件；缺失/损坏/结构非法 → 空 dict + WARNING（显式降级不炸）。"""
+    """读 GUI 状态文件；缺失=正常空态静默（首次启动常见），损坏/结构非法 → 空 dict + WARNING。"""
     path: Path = gui_dir / GUI_STATE_NAME
     if not path.is_file():
         return {}
@@ -108,18 +108,23 @@ def _read_gui_state(gui_dir: Path) -> dict[str, Any]:
 
 
 def _write_gui_state(gui_dir: Path, state: dict[str, Any]) -> None:
-    """原子写 GUI 状态（tmp + os.replace）；写失败记 ERROR 不炸主流程。"""
+    """原子写 GUI 状态（tmp 写后回读校验 + os.replace）；失败记 ERROR 不炸主流程。"""
     try:
         gui_dir.mkdir(parents=True, exist_ok=True)
         tmp: Path = gui_dir / (GUI_STATE_NAME + ".tmp")
-        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
+        payload: str = json.dumps(state, ensure_ascii=False, indent=1)
+        tmp.write_text(payload, encoding="utf-8")
+        json.loads(tmp.read_text(encoding="utf-8"))  # 回读校验：坏文件不进 replace
         os.replace(tmp, gui_dir / GUI_STATE_NAME)
-    except OSError as e:
+    except (OSError, ValueError) as e:
         logger.error("GUI 状态写入失败: %s (%s)", gui_dir, e, exc_info=True)
 
 
 def _read_cli_srcdir(session_dir: Path) -> str | None:
-    """从场次 video_cli.json 读 srcdir（GUI 预填素材目录用）；缺失/损坏 → None + WARNING。"""
+    """从场次 video_cli.json 读 srcdir（GUI 预填素材目录用）。
+
+    缺失 = 正常空态静默（老场次无此文件）；损坏 → None + WARNING。
+    """
     path: Path = session_dir / VIDEO_CLI_STATE_NAME
     if not path.is_file():
         return None

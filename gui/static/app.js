@@ -214,8 +214,9 @@ function resumeSession(session) {
   state.teamSkipped = false;
   refreshStatus().then(function (st) {
     if (!st) return;
-    // srcdir 记忆（gui-state-persist）：续接场次时预填该场次的素材目录
-    if (st.srcdir) state.srcdir = st.srcdir;
+    // srcdir 记忆（gui-state-persist）：续接场次时预填该场次的素材目录；
+    // 用户已手输（state.srcdir 非空）则尊重用户输入不覆盖
+    if (st.srcdir && !state.srcdir) state.srcdir = st.srcdir;
     var target = "source";
     for (var i = 0; i < STEPS.length; i++) {
       if (!stepDone(STEPS[i].id)) {
@@ -553,6 +554,10 @@ function renderSourceStep(container) {
   stepHeader(container, "第 1 步：选素材", "输入或粘贴存放比赛视频的目录路径，扫描目录里的 .mp4 文件。");
 
   var srcInput = textInput(state.srcdir, "如 D:\\比赛视频\\2026-08-30");
+  // 输入实时同步 state（gui-state-persist 审查修复）：防异步预填冲掉用户手输
+  srcInput.addEventListener("input", function () {
+    state.srcdir = srcInput.value.trim();
+  });
   addField(container, "素材目录", srcInput);
 
   var scanBtn = el("button", "btn", "扫描目录");
@@ -1098,7 +1103,10 @@ function init() {
         if (state.currentStep === "source") renderStep();
       }
     })
-    .catch(function () {}); // 记忆拉取失败不打扰（页面照常，仅无预填）
+    .catch(function (e) {
+      // 记忆拉取失败不打扰（页面照常，仅无预填），留痕便于排错
+      console.warn("gui-state 拉取失败:", e && e.message);
+    });
   $("#btn-new-session").addEventListener("click", function () {
     state.session = null;
     state.srcdir = state.lastSrcdir || "";

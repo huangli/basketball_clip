@@ -7,6 +7,7 @@ tmp_path 隔离，不触碰真实工作区。
 from __future__ import annotations
 
 import json
+import logging
 import pathlib
 import sys
 import time
@@ -569,16 +570,20 @@ def test_gui_state_null_when_never_scanned(tmp_path: pathlib.Path) -> None:
     assert resp.json()["last_srcdir"] is None
 
 
-def test_gui_state_corrupt_returns_null_with_warning(tmp_path: pathlib.Path) -> None:
+def test_gui_state_corrupt_returns_null_with_warning(
+    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
     # Arrange：state.json 损坏
     client, _, _ = _make_client(tmp_path)
     gui_dir = tmp_path / "work" / ".gui"
     gui_dir.mkdir(parents=True)
     (gui_dir / "state.json").write_text("{坏json", encoding="utf-8")
-    # Act / Assert：显式降级为 null 而非 500
-    resp = client.get("/api/gui-state")
+    # Act / Assert：显式降级为 null 而非 500，且留 WARNING 痕（不静默）
+    with caplog.at_level(logging.WARNING):
+        resp = client.get("/api/gui-state")
     assert resp.status_code == 200
     assert resp.json()["last_srcdir"] is None
+    assert any("GUI 状态文件" in r.message for r in caplog.records)
 
 
 def test_status_includes_srcdir_from_video_cli(tmp_path: pathlib.Path) -> None:
