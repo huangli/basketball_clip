@@ -20,6 +20,10 @@
     dist/basketball-clip/models/yolov8n.pt     打包后拷贝（scripts 按 cwd 相对路径读）
     dist/basketball-clip/pyproject.toml        打包后拷贝（diagnostics 版本解析）
     dist/basketball-clip/work|output|photos/   运行时生成（exe 同级，用户可写）
+
+打包流程会在 PyInstaller 删除 ``dist/basketball-clip/`` 之前，自动把 ``work/`` 和
+``output/`` 整体备份到 ``dist/_userdata_backup_<时间戳>/``；打包/补料完成后再移回原位。
+任何步骤失败时，finally 也会尝试把备份移回，避免用户数据停留在临时备份目录。
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger("build_installer")
@@ -51,6 +56,8 @@ INNO_TIMEOUT_S: int = 14400  # 1.8GB lzma2/ultra64 压缩实测可达数十分�
 SMOKE_TIMEOUT_S: int = 600  # exe 首次启动 torch import 较慢
 # scripts/ 拷贝排除：字节码缓存不进包
 COPY_IGNORE: tuple[str, ...] = ("__pycache__", "*.pyc")
+# 用户运行数据目录（exe 同级，打包删 dist 前必须临时移出保护）
+USER_DATA_DIR_NAMES: tuple[str, ...] = ("work", "output")
 # Inno 编译器探测路径（用户级安装 + 两台机器级常见路径；PATH 优先）
 _ISCC_CANDIDATES: tuple[str, ...] = (
     r"%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe",
@@ -277,6 +284,92 @@ def run_inno(app_dir: Path) -> Path:
     return setup_exe
 
 
+def _user_data_dirs(app_dir: Path) -> list[Path]:
+    """返回需保护的运行时数据目录路径列表（按写死语义仅 work/output）。"""
+    return [app_dir / name for name in USER_DATA_DIR_NAMES]
+
+
+def _backup_user_data(app_dir: Path, backup_root: Path) -> Path | None:
+    """PyInstaller 删 dist 前，把 work/output 整体移到备份目录。
+
+    若移动中途失败，会把已移动的目录尽量移回原位，再抛 ``BuildError``，
+    避免用户数据分裂在原始位置与备份目录之间。
+
+    Args:
+        app_dir: 当前包目录（如 dist/basketball-clip/）。
+        backup_root: 备份目录父目录（如 dist/）。
+
+    Returns:
+        创建的备份目录；无数据需备份时返回 None。
+
+    Raises:
+        BuildError: 移动失败或回滚失败。
+    """
+    data_dirs = [p for p in _user_data_dirs(app_dir) if p.is_dir()]
+    if not data_dirs:
+        logger.info("无需备份用户数据: %s 下无 work/output", app_dir)
+        return None
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    backup_dir = backup_root / f"_userdata_backup_{timestamp}"
+    backup_dir.mkdir(parents=True, exist_ok=False)
+    logger.info("备份用户数据到: %s", backup_dir)
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for data_dir in data_dirs:
+            target = backup_dir / data_dir.name
+            shutil.move(str(data_dir), str(target))
+            moved.append((data_dir, target))
+            logger.info("已移动: %s -> %s", data_dir, target)
+    except OSError as e:
+        logger.error("备份过程中出错: %s；尝试回滚已移动目录", e)
+        for original, backed in moved:
+            try:
+                shutil.move(str(backed), str(original))
+                logger.info("已回滚: %s -> %s", backed, original)
+            except OSError as rollback_err:
+                logger.error("回滚失败 %s -> %s: %s", backed, original, rollback_err)
+        try:
+            if backup_dir.is_dir() and not any(backup_dir.iterdir()):
+                backup_dir.rmdir()
+        except OSError:
+            pass
+        raise BuildError(f"备份用户数据失败: {e}") from e
+    return backup_dir
+
+
+def _restore_user_data(app_dir: Path, backup_dir: Path | None) -> None:
+    """打包完成后把备份的 work/output 移回原位，并删除空备份目录。
+
+    若 app_dir 不存在会自动创建父目录；若目标位置已存在同名目录则报错不覆盖。
+
+    Args:
+        app_dir: 新包目录。
+        backup_dir: 备份目录（可为 None）。
+
+    Raises:
+        BuildError: 目标已存在同名目录，或移回失败。
+    """
+    if backup_dir is None or not backup_dir.is_dir():
+        return
+    logger.info("恢复用户数据: %s -> %s", backup_dir, app_dir)
+    app_dir.mkdir(parents=True, exist_ok=True)
+    for name in USER_DATA_DIR_NAMES:
+        backed = backup_dir / name
+        if not backed.is_dir():
+            continue
+        original = app_dir / name
+        if original.exists():
+            raise BuildError(f"恢复用户数据冲突，目标已存在: {original}")
+        shutil.move(str(backed), str(original))
+        logger.info("已恢复: %s", original)
+    # 成功恢复后删除空备份目录
+    if backup_dir.is_dir() and not any(backup_dir.iterdir()):
+        backup_dir.rmdir()
+        logger.info("已删除空备份目录: %s", backup_dir)
+    elif backup_dir.is_dir():
+        logger.warning("备份目录仍含内容，未删除: %s", backup_dir)
+
+
 def main(argv: list[str] | None = None) -> int:
     """打包入口。返回退出码（0=成功，1=失败，2=参数错误）。"""
     args = argv if argv is not None else sys.argv[1:]
@@ -286,11 +379,16 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     _configure_logging()
     started = time.monotonic()
+    app_dir = DIST_DIR / APP_NAME
+    backup_dir: Path | None = None
     try:
         ensure_assets()
+        backup_dir = _backup_user_data(app_dir, DIST_DIR)
         run_pyinstaller()
         app_dir = DIST_DIR / APP_NAME
         stage_runtime_files(app_dir)
+        _restore_user_data(app_dir, backup_dir)
+        backup_dir = None
         smoke_test(app_dir)
         report_size(app_dir)
         if not pack_only:
@@ -298,6 +396,9 @@ def main(argv: list[str] | None = None) -> int:
     except BuildError as e:
         logger.error("打包失败: %s", e)
         return 1
+    finally:
+        if backup_dir is not None:
+            _restore_user_data(app_dir, backup_dir)
     logger.info(
         "打包完成: %s（耗时 %.1f 分钟）", DIST_DIR / APP_NAME, (time.monotonic() - started) / 60
     )

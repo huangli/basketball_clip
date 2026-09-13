@@ -36,3 +36,5 @@ ignore = ["RUF001", "RUF002", "RUF003"]
 [lint.per-file-ignores]
 # 测试中 assert 是预期用法，豁免 S101
 "tests/**" = ["S101"]
+# spike 脚本为最小可执行验证，print 是面向用户的最终输出
+"packaging/spike/**" = ["T20"]
