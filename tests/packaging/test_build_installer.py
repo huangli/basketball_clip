@@ -4,6 +4,8 @@
 1. 正常流程：work/output 被备份，dist 重建后移回，空备份目录删除。
 2. PyInstaller 失败场景：dist 被删后未重建，备份仍能移回。
 3. 防御行为：目标已存在同名目录时报错不覆盖。
+4. 备份目录创建失败时以 BuildError 友好提示，而非裸 PermissionError。
+5. 恢复中途失败后 finally 兜底恢复剩余目录，且不掩盖原异常。
 """
 
 from __future__ import annotations
@@ -153,3 +155,65 @@ def test_backup_rolls_back_partial_moves_on_failure(
     assert (app_dir / "output" / "20260913" / "highlight.mp4").is_file()
     # 不应留下残留备份目录
     assert not any(p.name.startswith("_userdata_backup_") for p in dist_dir.iterdir())
+
+
+def test_backup_mkdir_failure_raises_build_error(
+    bi: ModuleType, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """备份目录创建失败时应抛出 BuildError（中文信息含路径），而非裸 PermissionError。"""
+    dist_dir, app_dir = _make_fake_dist(tmp_path)
+
+    def raise_permission_error(*args: object, **kwargs: object) -> None:
+        raise PermissionError("模拟 mkdir 权限失败")
+
+    monkeypatch.setattr(pathlib.Path, "mkdir", raise_permission_error)
+
+    with pytest.raises(bi.BuildError, match="无法创建备份目录"):
+        bi._backup_user_data(app_dir, dist_dir)
+
+
+def test_restore_mid_failure_then_failsafe_recovers_remaining(
+    bi: ModuleType, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """模拟 work 恢复成功、output 恢复失败，finally 兜底应移回剩余目录且不掩盖原异常。"""
+    dist_dir, app_dir = _make_fake_dist(tmp_path)
+
+    backup_dir = bi._backup_user_data(app_dir, dist_dir)
+    assert backup_dir is not None
+
+    # 模拟 PyInstaller 删除并重建 dist/basketball-clip
+    shutil.rmtree(app_dir)
+    app_dir.mkdir(parents=True)
+
+    real_move = bi.shutil.move
+    call_count = 0
+
+    def fake_move(src: str, dst: str, **kwargs: object) -> str:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise PermissionError("模拟 output 移回失败")
+        return real_move(src, dst, **kwargs)
+
+    monkeypatch.setattr(bi.shutil, "move", fake_move)
+
+    original_exc: Exception | None = None
+    try:
+        bi._restore_user_data(app_dir, backup_dir)
+    except Exception as e:
+        original_exc = e
+
+    assert isinstance(original_exc, bi.BuildError)
+    assert "output 移回失败" in str(original_exc)
+
+    # 此时 work 已恢复，output 仍在备份目录
+    assert (app_dir / "work" / "20260913" / "goals.json").is_file()
+    assert (backup_dir / "output" / "20260913" / "highlight.mp4").is_file()
+    assert not (app_dir / "output").exists()
+
+    # finally 兜底恢复：不应再因 work 目标已存在而抛错，也不得抛出任何新异常
+    bi._restore_user_data_failsafe(app_dir, backup_dir)
+
+    # 剩余目录被移回，备份目录清空
+    assert (app_dir / "output" / "20260913" / "highlight.mp4").is_file()
+    assert not backup_dir.exists()

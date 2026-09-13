@@ -311,7 +311,10 @@ def _backup_user_data(app_dir: Path, backup_root: Path) -> Path | None:
         return None
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     backup_dir = backup_root / f"_userdata_backup_{timestamp}"
-    backup_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        backup_dir.mkdir(parents=True, exist_ok=False)
+    except OSError as e:
+        raise BuildError(f"无法创建备份目录: {backup_dir}") from e
     logger.info("备份用户数据到: %s", backup_dir)
     moved: list[tuple[Path, Path]] = []
     try:
@@ -337,20 +340,38 @@ def _backup_user_data(app_dir: Path, backup_root: Path) -> Path | None:
     return backup_dir
 
 
-def _restore_user_data(app_dir: Path, backup_dir: Path | None) -> None:
+def _try_remove_backup_dir(backup_dir: Path, *, warn_on_left: bool = False) -> None:
+    """删除空备份目录；非空时按参数决定是否告警。任何 OSError 只记录不抛出。"""
+    try:
+        if backup_dir.is_dir() and not any(backup_dir.iterdir()):
+            backup_dir.rmdir()
+            logger.info("已删除空备份目录: %s", backup_dir)
+        elif backup_dir.is_dir() and warn_on_left:
+            logger.warning("备份目录仍含内容，未删除: %s", backup_dir)
+    except OSError as e:
+        logger.error("删除备份目录 %s 失败: %s", backup_dir, e)
+
+
+def _restore_user_data(app_dir: Path, backup_dir: Path | None) -> set[str]:
     """打包完成后把备份的 work/output 移回原位，并删除空备份目录。
 
     若 app_dir 不存在会自动创建父目录；若目标位置已存在同名目录则报错不覆盖。
+    返回成功恢复的目录名集合；失败抛出异常时，已移回的目录可通过检查 backup_dir
+    剩余内容或调用 ``_restore_user_data_failsafe`` 兜底恢复。
 
     Args:
         app_dir: 新包目录。
         backup_dir: 备份目录（可为 None）。
 
+    Returns:
+        成功恢复的目录名集合。
+
     Raises:
         BuildError: 目标已存在同名目录，或移回失败。
     """
+    restored: set[str] = set()
     if backup_dir is None or not backup_dir.is_dir():
-        return
+        return restored
     logger.info("恢复用户数据: %s -> %s", backup_dir, app_dir)
     app_dir.mkdir(parents=True, exist_ok=True)
     for name in USER_DATA_DIR_NAMES:
@@ -360,14 +381,48 @@ def _restore_user_data(app_dir: Path, backup_dir: Path | None) -> None:
         original = app_dir / name
         if original.exists():
             raise BuildError(f"恢复用户数据冲突，目标已存在: {original}")
-        shutil.move(str(backed), str(original))
+        try:
+            shutil.move(str(backed), str(original))
+        except OSError as e:
+            raise BuildError(f"恢复用户数据失败 {backed} -> {original}: {e}") from e
+        restored.add(name)
         logger.info("已恢复: %s", original)
-    # 成功恢复后删除空备份目录
-    if backup_dir.is_dir() and not any(backup_dir.iterdir()):
-        backup_dir.rmdir()
-        logger.info("已删除空备份目录: %s", backup_dir)
-    elif backup_dir.is_dir():
-        logger.warning("备份目录仍含内容，未删除: %s", backup_dir)
+    _try_remove_backup_dir(backup_dir)
+    return restored
+
+
+def _restore_user_data_failsafe(app_dir: Path, backup_dir: Path | None) -> None:
+    """finally 兜底恢复：只处理 backup_dir 中仍剩余的目录，任何异常只记录不抛出。
+
+    目标位置已存在同名目录时视为该目录已恢复并跳过；单个目录移回失败时记录 ERROR
+    并继续处理剩余目录，避免掩盖主异常。
+
+    Args:
+        app_dir: 新包目录。
+        backup_dir: 备份目录（可为 None）。
+    """
+    if backup_dir is None or not backup_dir.is_dir():
+        return
+    logger.info("兜底恢复用户数据: %s -> %s", backup_dir, app_dir)
+    try:
+        app_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.error("无法创建应用目录 %s: %s", app_dir, e)
+        return
+    for name in USER_DATA_DIR_NAMES:
+        backed = backup_dir / name
+        if not backed.is_dir():
+            continue
+        original = app_dir / name
+        if original.exists():
+            logger.warning("兜底恢复跳过（目标已存在，视为已恢复）: %s", original)
+            continue
+        try:
+            shutil.move(str(backed), str(original))
+            logger.info("兜底恢复成功: %s", original)
+        except OSError as e:
+            logger.error("兜底恢复失败 %s -> %s: %s", backed, original, e)
+    _try_remove_backup_dir(backup_dir, warn_on_left=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -398,7 +453,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     finally:
         if backup_dir is not None:
-            _restore_user_data(app_dir, backup_dir)
+            _restore_user_data_failsafe(app_dir, backup_dir)
     logger.info(
         "打包完成: %s（耗时 %.1f 分钟）", DIST_DIR / APP_NAME, (time.monotonic() - started) / 60
     )
