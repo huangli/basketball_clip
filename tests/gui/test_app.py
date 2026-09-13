@@ -369,6 +369,224 @@ def test_team_config_errors(tmp_path: pathlib.Path) -> None:
     assert "error" in resp2.json()
 
 
+# ---- label-export ----
+
+
+def _sample_goals() -> list[dict[str, object]]:
+    """构造两条测试进球记录（一条确认、一条不收）。"""
+    return [
+        {"file": "a.mp4", "anchor_time": 1.0, "status": "confirmed"},
+        {"file": "b.mp4", "anchor_time": 2.0, "status": "rejected"},
+    ]
+
+
+def test_label_export_write_and_read(tmp_path: pathlib.Path) -> None:
+    client, _, _ = _make_client(tmp_path)
+    sd = tmp_path / "work" / "20260801"
+    sd.mkdir(parents=True)
+    data = {"session": "20260801", "goals": _sample_goals()}
+    resp = client.post("/api/sessions/20260801/label-export", json={"batch": None, "data": data})
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["ok"] is True
+    assert payload["path"] == "20260801/goals_20260801.json"
+    assert payload["n_confirmed"] == 1
+    assert payload["n_total"] == 2
+    written = json.loads((sd / "goals_20260801.json").read_text(encoding="utf-8"))
+    assert written == data
+
+
+def test_label_export_batch_filename(tmp_path: pathlib.Path) -> None:
+    client, _, _ = _make_client(tmp_path)
+    sd = tmp_path / "work" / "s1"
+    sd.mkdir(parents=True)
+    data = {"session": "s1", "goals": _sample_goals()}
+    resp = client.post("/api/sessions/s1/label-export", json={"batch": 2, "data": data})
+    assert resp.status_code == 200
+    assert resp.json()["path"] == "s1/goals_batch2.json"
+    assert (sd / "goals_batch2.json").is_file()
+
+
+def test_label_export_overwrite_is_idempotent(tmp_path: pathlib.Path) -> None:
+    client, _, _ = _make_client(tmp_path)
+    sd = tmp_path / "work" / "s1"
+    sd.mkdir(parents=True)
+    first = {"session": "s1", "goals": _sample_goals()}
+    client.post("/api/sessions/s1/label-export", json={"batch": 1, "data": first})
+    second = {"session": "s1", "goals": [{"file": "c.mp4", "status": "confirmed"}]}
+    resp = client.post("/api/sessions/s1/label-export", json={"batch": 1, "data": second})
+    assert resp.status_code == 200
+    assert resp.json()["n_total"] == 1
+    written = json.loads((sd / "goals_batch1.json").read_text(encoding="utf-8"))
+    assert written == second
+
+
+def test_label_export_bad_session_404(tmp_path: pathlib.Path) -> None:
+    client, _, _ = _make_client(tmp_path)
+    resp = client.post(
+        "/api/sessions/20990101/label-export",
+        json={"batch": None, "data": {"session": "20990101", "goals": []}},
+    )
+    assert resp.status_code == 404
+    assert "error" in resp.json()
+
+
+def test_label_export_data_not_object_400(tmp_path: pathlib.Path) -> None:
+    client, _, _ = _make_client(tmp_path)
+    sd = tmp_path / "work" / "s1"
+    sd.mkdir(parents=True)
+    resp = client.post("/api/sessions/s1/label-export", json={"batch": None, "data": []})
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+
+
+def test_label_export_goals_not_list_400(tmp_path: pathlib.Path) -> None:
+    client, _, _ = _make_client(tmp_path)
+    sd = tmp_path / "work" / "s1"
+    sd.mkdir(parents=True)
+    resp = client.post(
+        "/api/sessions/s1/label-export",
+        json={"batch": None, "data": {"session": "s1", "goals": "nope"}},
+    )
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+
+
+@pytest.mark.parametrize("bad_batch", [0, -1])
+def test_label_export_batch_non_positive_400(tmp_path: pathlib.Path, bad_batch: int) -> None:
+    client, _, _ = _make_client(tmp_path)
+    sd = tmp_path / "work" / "s1"
+    sd.mkdir(parents=True)
+    resp = client.post(
+        "/api/sessions/s1/label-export",
+        json={"batch": bad_batch, "data": {"session": "s1", "goals": []}},
+    )
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+
+
+def test_label_export_batch_string_400(tmp_path: pathlib.Path) -> None:
+    client, _, _ = _make_client(tmp_path)
+    sd = tmp_path / "work" / "s1"
+    sd.mkdir(parents=True)
+    resp = client.post(
+        "/api/sessions/s1/label-export",
+        json={"batch": "x", "data": {"session": "s1", "goals": []}},
+    )
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+
+
+# ---- roster-export ----
+
+
+def _sample_roster_data(session: str = "s1") -> dict[str, object]:
+    """构造一份合法的认人导出 payload。"""
+    return {
+        "session": session,
+        "confirmed": True,
+        "players": [{"tag": "黑21", "name": "测试员甲", "team": "对手"}],
+        "assignments": {"a.mp4#4.1": "黑21"},
+    }
+
+
+def test_roster_export_write_and_read(tmp_path: pathlib.Path) -> None:
+    client, _, _ = _make_client(tmp_path)
+    sd = tmp_path / "work" / "20260801"
+    sd.mkdir(parents=True)
+    data = _sample_roster_data("20260801")
+    resp = client.post("/api/sessions/20260801/roster-export", json={"data": data})
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["ok"] is True
+    assert payload["path"] == "20260801/roster.json"
+    assert payload["n_assignments"] == 1
+    written = json.loads((sd / "roster.json").read_text(encoding="utf-8"))
+    assert written == data
+
+
+def test_roster_export_overwrite_is_idempotent(tmp_path: pathlib.Path) -> None:
+    client, _, _ = _make_client(tmp_path)
+    sd = tmp_path / "work" / "s1"
+    sd.mkdir(parents=True)
+    first = _sample_roster_data("s1")
+    client.post("/api/sessions/s1/roster-export", json={"data": first})
+    second = dict(first)
+    second["assignments"] = {"b.mp4#2.0": "白22"}
+    resp = client.post("/api/sessions/s1/roster-export", json={"data": second})
+    assert resp.status_code == 200
+    assert resp.json()["n_assignments"] == 1
+    written = json.loads((sd / "roster.json").read_text(encoding="utf-8"))
+    assert written == second
+
+
+def test_roster_export_bad_session_404(tmp_path: pathlib.Path) -> None:
+    client, _, _ = _make_client(tmp_path)
+    resp = client.post(
+        "/api/sessions/20990101/roster-export",
+        json={"data": _sample_roster_data("20990101")},
+    )
+    assert resp.status_code == 404
+    assert "error" in resp.json()
+
+
+def test_roster_export_data_not_object_400(tmp_path: pathlib.Path) -> None:
+    client, _, _ = _make_client(tmp_path)
+    sd = tmp_path / "work" / "s1"
+    sd.mkdir(parents=True)
+    resp = client.post("/api/sessions/s1/roster-export", json={"data": []})
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+
+
+@pytest.mark.parametrize("confirmed", [None, "yes", 1, 0])
+def test_roster_export_confirmed_not_bool_400(tmp_path: pathlib.Path, confirmed: object) -> None:
+    client, _, _ = _make_client(tmp_path)
+    sd = tmp_path / "work" / "s1"
+    sd.mkdir(parents=True)
+    data = _sample_roster_data("s1")
+    if confirmed is None:
+        del data["confirmed"]
+    else:
+        data["confirmed"] = confirmed
+    resp = client.post("/api/sessions/s1/roster-export", json={"data": data})
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+
+
+def test_roster_export_assignments_not_dict_400(tmp_path: pathlib.Path) -> None:
+    client, _, _ = _make_client(tmp_path)
+    sd = tmp_path / "work" / "s1"
+    sd.mkdir(parents=True)
+    data = _sample_roster_data("s1")
+    data["assignments"] = "bad"
+    resp = client.post("/api/sessions/s1/roster-export", json={"data": data})
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+
+
+def test_roster_export_assignments_empty_value_400(tmp_path: pathlib.Path) -> None:
+    client, _, _ = _make_client(tmp_path)
+    sd = tmp_path / "work" / "s1"
+    sd.mkdir(parents=True)
+    data = _sample_roster_data("s1")
+    data["assignments"] = {"a.mp4#4.1": ""}
+    resp = client.post("/api/sessions/s1/roster-export", json={"data": data})
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+
+
+def test_roster_export_players_element_not_dict_400(tmp_path: pathlib.Path) -> None:
+    client, _, _ = _make_client(tmp_path)
+    sd = tmp_path / "work" / "s1"
+    sd.mkdir(parents=True)
+    data = _sample_roster_data("s1")
+    data["players"] = ["not-a-dict"]
+    resp = client.post("/api/sessions/s1/roster-export", json={"data": data})
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+
+
 # ---- people / build / photo 提交 ----
 
 

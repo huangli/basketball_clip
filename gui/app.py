@@ -180,6 +180,19 @@ class TeamConfigRequest(BaseModel):
     opponent: str | None = None
 
 
+class LabelExportRequest(BaseModel):
+    """POST /api/sessions/{session}/label-export 请求体。"""
+
+    batch: int | None = None
+    data: dict[str, Any]
+
+
+class RosterExportRequest(BaseModel):
+    """POST /api/sessions/{session}/roster-export 请求体。"""
+
+    data: dict[str, Any]
+
+
 # ---- 边界校验与错误约定 ----
 
 
@@ -621,6 +634,80 @@ def create_app(
             _fail(500, f"配置写入失败: {target}")
         logger.info("team_config 已写: %s team_name=%r", target, team_name)
         return {"ok": True, "team_config": payload}
+
+    # ---- label-export（标注页导出自动落盘） ----
+
+    @app.post("/api/sessions/{session}/label-export")
+    def write_label_export(session: str, body: LabelExportRequest) -> dict[str, Any]:
+        """写 work/<场次>/goals_batchK.json 或 goals_<场次>.json（原子写：tmp + os.replace）。"""
+        session_dir = _session_dir_or_404(work, _valid_session(session))
+        if body.batch is not None and body.batch < 1:
+            _fail(400, f"batch 必须 >= 1，收到 {body.batch}")
+        if not isinstance(body.data, dict):
+            _fail(400, "data 必须是对象")
+        goals = body.data.get("goals")
+        if not isinstance(goals, list):
+            _fail(400, "data.goals 必须是数组")
+        file_name = (
+            f"goals_batch{body.batch}.json" if body.batch is not None else f"goals_{session}.json"
+        )
+        target = session_dir / file_name
+        tmp = session_dir / f"{file_name}.tmp"
+        try:
+            tmp.write_text(json.dumps(body.data, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp, target)
+        except OSError as e:
+            logger.error("label-export 写入失败: %s (%s)", target, e, exc_info=True)
+            _fail(500, f"进球数据写入失败: {target}")
+        n_confirmed = sum(
+            1 for g in goals if isinstance(g, dict) and g.get("status") == "confirmed"
+        )
+        n_total = len(goals)
+        logger.info("label-export 已写: %s confirmed=%d total=%d", target, n_confirmed, n_total)
+        return {
+            "ok": True,
+            "path": target.relative_to(work).as_posix(),
+            "n_confirmed": n_confirmed,
+            "n_total": n_total,
+        }
+
+    # ---- roster-export（认人页导出自动落盘） ----
+
+    @app.post("/api/sessions/{session}/roster-export")
+    def write_roster_export(session: str, body: RosterExportRequest) -> dict[str, Any]:
+        """写 work/<场次>/roster.json（原子写：tmp + os.replace）。"""
+        session_dir = _session_dir_or_404(work, _valid_session(session))
+        if not isinstance(body.data, dict):
+            _fail(400, "data 必须是对象")
+        confirmed: Any = body.data.get("confirmed")
+        if not isinstance(confirmed, bool):
+            _fail(400, "confirmed 必须是 bool")
+        assignments: Any = body.data.get("assignments")
+        if not isinstance(assignments, dict):
+            _fail(400, "assignments 必须是对象")
+        for key, value in assignments.items():
+            if not isinstance(value, str) or not value:
+                _fail(400, f"assignments 值必须为非空字符串: {key!r}")
+        players: Any = body.data.get("players")
+        if not isinstance(players, list):
+            _fail(400, "players 必须是数组")
+        for idx, item in enumerate(players):
+            if not isinstance(item, dict):
+                _fail(400, f"players[{idx}] 必须是对象")
+        target = session_dir / "roster.json"
+        tmp = session_dir / "roster.json.tmp"
+        try:
+            tmp.write_text(json.dumps(body.data, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp, target)
+        except OSError as e:
+            logger.error("roster-export 写入失败: %s (%s)", target, e, exc_info=True)
+            _fail(500, f"roster 写入失败: {target}")
+        logger.info("roster-export 已写: %s n_assignments=%d", target, len(assignments))
+        return {
+            "ok": True,
+            "path": target.relative_to(work).as_posix(),
+            "n_assignments": len(assignments),
+        }
 
     # ---- 任务提交（score/people/build/photo = 一条 video.py 子命令） ----
 

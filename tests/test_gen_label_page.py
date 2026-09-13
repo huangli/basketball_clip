@@ -337,3 +337,58 @@ def test_mark_does_not_advance_on_remark() -> None:
     # Assert：改标（已有标记）原地 show(cur)；仅首标才查找下一个未标前进
     assert "if (!isNew)" in html
     assert "show(cur);" in html
+
+
+# ---- export-autosave：标注页导出改为 POST 回服务端 ----
+
+
+def test_build_html_injects_batch_constant_int() -> None:
+    # Arrange / Act
+    html = build_html([_event()], "s", batch=2)
+    # Assert：batch 为 int 时直接注入数字，供 fetch body 使用
+    assert "const BATCH = 2;" in html
+
+
+def test_build_html_injects_batch_constant_null() -> None:
+    # Arrange / Act
+    html = build_html([_event()], "s")
+    # Assert：无 batch 时注入 null，服务端据此推导 goals_<场次>.json
+    assert "const BATCH = null;" in html
+
+
+def test_build_html_export_uses_post_fetch_and_three_branches() -> None:
+    # Arrange / Act
+    html = build_html([_event()], "s", batch=2)
+    # Assert：fetch POST 到统一端点，并保留三分支错误处理
+    assert 'const url = "/api/sessions/" + encodeURIComponent(SESSION) + "/label-export"' in html
+    assert "fetch(url, {" in html
+    assert 'method: "POST"' in html
+    assert "JSON.stringify({ batch: BATCH, data: { session: SESSION, goals } })" in html
+    assert "服务器保存失败（" in html
+    assert "已改为下载，请手动移到 work 场次目录" in html
+    assert "服务端返回：" in html
+    assert "服务端异常（" in html
+    assert "请检查场次目录下文件是否已生成" in html
+
+
+def test_build_html_export_success_alert_shows_path_and_counts() -> None:
+    # Arrange / Act
+    html = build_html([_event()], "s", batch=1)
+    # Assert：成功弹窗用服务端返回的 path/n_confirmed/n_total 文案
+    assert "已保存到 " in html
+    assert "j.path" in html
+    assert "j.n_confirmed" in html
+    assert "j.n_total" in html
+
+
+def test_build_html_export_alerts_have_no_backslash() -> None:
+    # Arrange / Act
+    html = build_html([_event()], "s")
+    # Assert：新增 5xx/回退提示语不得含字面反斜杠（Windows 路径历史坑）
+    script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+    # 过滤掉历史 confirm 文案里的合法 \n，只检查新增 alert 文案段
+    export_start = script.index("function exportGoals()")
+    export_block = script[export_start:]
+    alert_texts = [m.split('"', 1)[1] for m in export_block.split('alert("')[1:]]
+    for text in alert_texts:
+        assert "\\" not in text, f"alert 文案含反斜杠: {text!r}"

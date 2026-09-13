@@ -4,9 +4,9 @@
 读取 gen_review_clips --keep-clips 产出的事件索引（events_index.json），
 在同目录生成自包含 label.html（事件数据内联，视频用相对路径 clips/）。
 用户用浏览器打开即可：视频循环播，点按钮或按键标注，进度存 localStorage
-（可中断续标，刷新/重开回到上次标注位置），最后一键下载 goals 文件
-（无需手敲任何文本）；--batch K 时导出即 goals_batchK.json（移到 work
-场次目录 CLI 直接认），缺省维持 goals_<场次>.json（需人工改名接入）。
+（可中断续标，刷新/重开回到上次标注位置），最后一键导出 goals 文件
+（自动落盘到 work 场次目录，无需手敲任何文本）；--batch K 时导出即
+goals_batchK.json，缺省维持 goals_<场次>.json。
 
 输入：--index 指定的 events_index.json；缺省自动取 work/ 下最新的
       work/<场次>/review*/events_index.json（新增场次素材跑完
@@ -155,6 +155,7 @@ small { color: #999; }
 const EVENTS = __EVENTS__;
 const SESSION = "__SESSION__";
 const OUTNAME = "__OUTNAME__";
+const BATCH = __BATCH__;
 const BEFORE = __BEFORE__, AFTER = __AFTER__;
 const SPEED = __SPEED__;  // 审核片段烘焙倍率（gen_review_clips.SPEED），J 捕锚换算用
 const LSKEY = "label_" + SESSION + "__LSUFFIX__";
@@ -311,14 +312,39 @@ function exportGoals() {
     });
   }
   const payload = JSON.stringify({ session: SESSION, goals }, null, 1);
-  const blob = new Blob([payload], { type: "application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = OUTNAME;
-  a.click();
-  const nGoal = goals.filter(g => g.status === "confirmed").length;
-  alert("已下载 " + OUTNAME + "（进球 " + nGoal +
-        " 个，不收 " + (goals.length - nGoal) + " 个），移到 work 场次目录即可");
+  const url = "/api/sessions/" + encodeURIComponent(SESSION) + "/label-export";
+  fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ batch: BATCH, data: { session: SESSION, goals } })
+  }).then(async res => {
+    if (res.ok) {
+      const j = await res.json();
+      const confirmed = typeof j.n_confirmed === "number" ? j.n_confirmed : 0;
+      const total = typeof j.n_total === "number" ? j.n_total : 0;
+      alert("已保存到 " + j.path + "（进球 " + confirmed +
+            " 个，不收 " + (total - confirmed) + " 个）");
+      return;
+    }
+    let reason = await res.text();
+    try {
+      const parsed = JSON.parse(reason);
+      if (parsed.error) reason = parsed.error;
+    } catch (e) {}
+    if (res.status >= 400 && res.status < 500) {
+      alert("服务端返回：" + reason);
+    } else {
+      alert("服务端异常（" + reason + "），请检查场次目录下文件是否已生成");
+    }
+  }).catch(err => {
+    const reason = err && err.message ? err.message : String(err);
+    alert("服务器保存失败（" + reason + "），已改为下载，请手动移到 work 场次目录");
+    const blob = new Blob([payload], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = OUTNAME;
+    a.click();
+  });
 }
 document.getElementById("goal").onclick = () => markGoal(true);
 document.getElementById("goalm").onclick = () => markGoal(false);
@@ -374,9 +400,10 @@ def build_html(events: list[dict[str, Any]], session: str, batch: int | None = N
         events: events_index.json 中的事件列表（复制后加 grp 字段内联，
             不改调用方原 dict）。
         session: 场次名（页面标题与 localStorage 键后缀）。
-        batch: 批次号；给了导出文件名即 goals_batchK.json（移动即接入 CLI），
-            localStorage 进度键也带 _batchK 后缀（跨批隔离，label-page-fixes
-            Bug②）；不给维持旧名 goals_<场次>.json 与旧键（旧布局/adhoc/手工调用）。
+        batch: 批次号；给了导出文件名即 goals_batchK.json（自动落盘到 work
+            场次目录），localStorage 进度键也带 _batchK 后缀（跨批隔离，
+            label-page-fixes Bug②），页面内联 BATCH 常量供 fetch body 使用；
+            不给维持旧名 goals_<场次>.json 与旧键（旧布局/adhoc/手工调用）。
 
     Returns:
         label.html 全文。
@@ -401,6 +428,7 @@ def build_html(events: list[dict[str, Any]], session: str, batch: int | None = N
         .replace("__SESSION__", session)
         .replace("__LSUFFIX__", f"_batch{batch}" if batch is not None else "")
         .replace("__OUTNAME__", out_name)
+        .replace("__BATCH__", str(batch) if batch is not None else "null")
         .replace("__BEFORE__", str(CLIP_BEFORE_SEC))
         .replace("__AFTER__", str(CLIP_AFTER_SEC))
         # 审核片段烘焙倍率（J 捕锚换算用），全模块路径引用 gen_review_clips 不硬编码

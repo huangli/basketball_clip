@@ -1423,6 +1423,60 @@ class TestAcceptAllPrefills:
         assert proc.returncode == 0, proc.stderr
 
 
+class TestBuildHtmlRosterExport:
+    """roster 导出自动落位：fetch POST + 错误分流 + 成功提示（docs/export-autosave Phase 2）。"""
+
+    def _html(self) -> str:
+        return build_html([], [], "s", {}, {}, "对手", "主队")
+
+    def test_export_uses_fetch_post(self) -> None:
+        html = self._html()
+        assert '"/api/sessions/" + encodeURIComponent(SESSION) + "/roster-export"' in html
+        assert 'method: "POST"' in html
+        assert "JSON.stringify({ data: payload })" in html
+
+    def test_export_success_alert_with_path_and_stats(self) -> None:
+        html = self._html()
+        assert "已保存到 " in html
+        assert "j.path" in html
+        assert "j.n_assignments" in html
+        assert "confirmed=" in html
+
+    def test_export_error_branches(self) -> None:
+        html = self._html()
+        assert "服务端返回：" in html
+        assert "服务端异常（" in html
+        assert "服务器保存失败（" in html
+        assert "已改为下载，请手动移到 work 场次目录" in html
+
+    def test_export_fallback_blob_still_named_roster_json(self) -> None:
+        html = self._html()
+        start = html.index("function exportRoster")
+        body = html[start : html.index("function acceptAllPrefills", start)]
+        assert 'a.download = "roster.json"' in body
+        assert "new Blob([JSON.stringify(payload, null, 1)]" in body
+
+    def test_export_no_new_named_function_between_export_and_acceptall(self) -> None:
+        html = self._html()
+        start = html.index("function exportRoster")
+        body = html[start : html.index("function acceptAllPrefills", start)]
+        # 不允许在两者之间插入新的命名函数（tests 按该区间切片断言）
+        assert body.count("function ") == 1
+
+    def test_export_js_syntax_node_check(self, tmp_path: pathlib.Path) -> None:
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node 不在 PATH")
+        html = self._html()
+        script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+        js_path = tmp_path / "page.js"
+        js_path.write_text(script, encoding="utf-8")
+        proc = subprocess.run(  # noqa: S603 node 路径来自 shutil.which，可信
+            [node, "--check", str(js_path)], capture_output=True, text=True, check=False
+        )
+        assert proc.returncode == 0, proc.stderr
+
+
 # ---- --photo-matches 照片库预填（docs/photo-roster/spec.md T5） ----
 
 

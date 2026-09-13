@@ -4,8 +4,8 @@
 读取 crop_scorers 产出的 scorer_candidates.json（每球一条：key/裁图/clip 预览
 片段/team_guess/SKIP 状态）+ goals.json（confirmed 球为页面条目全集），在同目录
 生成自包含 scorer.html（数据内联、裁图/视频相对路径、按键+按钮、localStorage
-进度、一键导出 roster.json——文件名即 CLI 认的名字，移到 work/<场次>/
-即可接入 people 预填链与 build，无需改名）。用户浏览器打开即可：看裁图与预览片段，
+进度、一键导出 roster.json——点击后 POST 回向导服务器自动落盘到 work/<场次>/
+roster.json，网络失败时回退 blob 下载）。用户浏览器打开即可：看裁图与预览片段，
 点球员按钮（数字键 1-9）或自由文本输入归属，S 跳过；SKIP 球标"无法定位"
 照常列出可手选；导出物 schema 严格过 scripts/roster.py（format_key 键、
 validate_roster 可校验），confirmed=true 仅当全部非 SKIP 球已归属。
@@ -976,20 +976,47 @@ function exportRoster() {
   }
   // confirmed=true 仅当全部非 SKIP 球已归属（SKIP 球允许未归属，spec 契约）
   const confirmed = ITEMS.every(it => it.status === "SKIP" || marks[it.key]);
-  const payload = JSON.stringify({ session: SESSION, confirmed, players, assignments }, null, 1);
-  const blob = new Blob([payload], { type: "application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "roster.json";
-  a.click();
   const nUn = ITEMS.filter(it => it.status !== "SKIP" && !marks[it.key]).length;
   // nNo 数全量 marks 的哨兵球——同 session 跨批次共享 localStorage，
   // 只数本页 ITEMS 会漏报其他批次的剔除球
   const nNo = Object.values(marks).filter(t => t === NOGOAL).length;
-  alert("已下载 roster.json（归属 " + Object.keys(assignments).length +
-        "/" + ITEMS.length + "，confirmed=" + confirmed +
-        (nNo ? "，不算进球 " + nNo + " 球（已剔除不参与合成）" : "") +
-        (nUn ? "，还有 " + nUn + " 个非 SKIP 球未归属" : "") + "），移到 work 场次目录即可");
+  const payload = { session: SESSION, confirmed, players, assignments };
+  const url = "/api/sessions/" + encodeURIComponent(SESSION) + "/roster-export";
+  fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ data: payload })
+  }).then(async res => {
+    if (res.ok) {
+      const j = await res.json();
+      const n = typeof j.n_assignments === "number"
+        ? j.n_assignments
+        : Object.keys(assignments).length;
+      alert("已保存到 " + j.path + "（归属 " + n + "/" + ITEMS.length +
+            "，confirmed=" + confirmed +
+            (nNo ? "，不算进球 " + nNo + " 球（已剔除不参与合成）" : "") +
+            (nUn ? "，还有 " + nUn + " 个非 SKIP 球未归属" : "") + "）");
+      return;
+    }
+    let reason = await res.text();
+    try {
+      const parsed = JSON.parse(reason);
+      if (parsed.error) reason = parsed.error;
+    } catch (e) {}
+    if (res.status >= 400 && res.status < 500) {
+      alert("服务端返回：" + reason);
+    } else {
+      alert("服务端异常（" + reason + "），请检查场次目录下文件是否已生成");
+    }
+  }).catch(err => {
+    const reason = err && err.message ? err.message : String(err);
+    alert("服务器保存失败（" + reason + "），已改为下载，请手动移到 work 场次目录");
+    const blob = new Blob([JSON.stringify(payload, null, 1)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "roster.json";
+    a.click();
+  });
 }
 function acceptAllPrefills() {
   // 一键全收预填（号码 read-numbers-batch / 照片 photo-roster）：仅 prefill_tag
