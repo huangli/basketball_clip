@@ -248,9 +248,11 @@ def _roster_confirmed(session_dir: Path) -> bool | None:
 
 
 def _session_stage(session_dir: Path, output_dir: Path) -> str:
-    """场次阶段：candidates → goals → roster → roster_confirmed → output（取最远）。
+    """场次阶段：output → roster_confirmed → roster → goals → candidates → init（取最远）。
 
-    output 判定 = output/<场次>/ 存在且非空；roster 损坏按未确认档（可观测 WARNING）。
+    output 判定 = output/<场次>/ 存在且非空；roster 损坏按未确认档（可观测 WARNING）；
+    candidates 判定 = 存在任意 candidates*.json（无下划线，与 _is_session_dir 同口径）；
+    init 为最终 fallback，表示场次已建但检测尚未产出 candidates。
     """
     out_dir = output_dir / session_dir.name
     try:
@@ -265,7 +267,9 @@ def _session_stage(session_dir: Path, output_dir: Path) -> str:
         return "roster"
     if any(session_dir.glob("goals*.json")):
         return "goals"
-    return "candidates"
+    if any(session_dir.glob("candidates*.json")):
+        return "candidates"
+    return "init"
 
 
 def _is_session_dir(path: Path) -> bool:

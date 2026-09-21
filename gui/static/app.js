@@ -24,8 +24,9 @@ var STEPS = [
 ];
 
 // 后端阶段 → 向导完成度映射（_session_stage 口径：取产物存在性最远档）
-var STAGE_RANK = { candidates: 1, goals: 2, roster: 3, roster_confirmed: 4, output: 5 };
+var STAGE_RANK = { init: 0, candidates: 1, goals: 2, roster: 3, roster_confirmed: 4, output: 5 };
 var STAGE_LABEL = {
+  init: "已建场次，待检测",
   candidates: "已检测，待标注",
   goals: "已标注",
   roster: "认人待确认",

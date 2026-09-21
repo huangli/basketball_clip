@@ -206,6 +206,10 @@ def _make_session_dir(work: pathlib.Path, session: str = "20260801") -> pathlib.
 def test_sessions_list_stages(tmp_path: pathlib.Path) -> None:
     client, _, _ = _make_client(tmp_path)
     work = tmp_path / "work"
+    # 场次 0：仅 session_facts.json，检测未开始 → init
+    s0 = work / "20260700"
+    s0.mkdir()
+    (s0 / "session_facts.json").write_text('{"files": {}}', encoding="utf-8")
     # 场次 1：只到 candidates 阶段
     s1 = work / "20260701"
     s1.mkdir()
@@ -234,11 +238,92 @@ def test_sessions_list_stages(tmp_path: pathlib.Path) -> None:
     resp = client.get("/api/sessions")
     assert resp.status_code == 200
     sessions = {s["session"]: s["stage"] for s in resp.json()["sessions"]}
+    assert sessions["20260700"] == "init"
     assert sessions["20260701"] == "candidates"
     assert sessions["20260702"] == "goals"
     assert sessions["20260703"] == "roster"
     assert sessions["20260704"] == "output"
     assert "detect" not in sessions
+
+
+@pytest.mark.parametrize(
+    "files, expected_stage",
+    [
+        ([], "init"),
+        (["session_facts.json"], "init"),
+        (["candidates_batch1.json"], "candidates"),
+        (["candidates_adhoc.json"], "candidates"),
+        (["candidates.json"], "candidates"),
+        (["goals_batch1.json"], "goals"),
+        (["roster.json"], "roster"),
+        (["roster.json", "candidates_batch1.json"], "roster"),
+    ],
+)
+def test_session_stage_ladder(
+    tmp_path: pathlib.Path, files: list[str], expected_stage: str
+) -> None:
+    """阶段阶梯回归：init/candidates（多种文件名）/goals/roster 各档判定。"""
+    client, _, _ = _make_client(tmp_path)
+    sd = tmp_path / "work" / "20260901"
+    sd.mkdir(parents=True)
+    for name in files:
+        if name == "session_facts.json":
+            (sd / name).write_text('{"files": {}}', encoding="utf-8")
+        elif name.startswith("roster"):
+            (sd / name).write_text(
+                json.dumps({"version": 1, "confirmed": False, "players": [], "assignments": {}}),
+                encoding="utf-8",
+            )
+        else:
+            (sd / name).write_text("{}", encoding="utf-8")
+
+    resp = client.get("/api/sessions/20260901/status")
+    assert resp.status_code == 200
+    assert resp.json()["stage"] == expected_stage
+
+
+def test_session_stage_roster_confirmed(tmp_path: pathlib.Path) -> None:
+    """confirmed roster 档高于未确认 roster。"""
+    client, _, _ = _make_client(tmp_path)
+    sd = tmp_path / "work" / "20260902"
+    sd.mkdir(parents=True)
+    (sd / "roster.json").write_text(
+        json.dumps({"version": 1, "confirmed": True, "players": [], "assignments": {}}),
+        encoding="utf-8",
+    )
+    (sd / "goals_batch1.json").write_text('{"goals": []}', encoding="utf-8")
+
+    resp = client.get("/api/sessions/20260902/status")
+    assert resp.status_code == 200
+    assert resp.json()["stage"] == "roster_confirmed"
+
+
+def test_session_stage_output(tmp_path: pathlib.Path) -> None:
+    """output 档为 ladder 最高档，覆盖 roster/goals。"""
+    client, _, _ = _make_client(tmp_path)
+    sd = tmp_path / "work" / "20260903"
+    sd.mkdir(parents=True)
+    (sd / "candidates_batch1.json").write_text("{}", encoding="utf-8")
+    out = tmp_path / "output" / "20260903"
+    out.mkdir(parents=True)
+    (out / "队伍_主队_进球集锦.mp4").write_bytes(b"")
+
+    resp = client.get("/api/sessions/20260903/status")
+    assert resp.status_code == 200
+    assert resp.json()["stage"] == "output"
+
+
+def test_session_stage_init_not_affects_is_session_dir(tmp_path: pathlib.Path) -> None:
+    """init 档目录仍被 _is_session_dir 识别（有 session_facts 标记物）。"""
+    client, _, _ = _make_client(tmp_path)
+    sd = tmp_path / "work" / "20260904"
+    sd.mkdir(parents=True)
+    (sd / "session_facts.json").write_text('{"files": {}}', encoding="utf-8")
+
+    resp = client.get("/api/sessions")
+    assert resp.status_code == 200
+    sessions = [s["session"] for s in resp.json()["sessions"]]
+    assert "20260904" in sessions
 
 
 def test_session_status_detail(tmp_path: pathlib.Path) -> None:
