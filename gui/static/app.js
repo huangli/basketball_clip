@@ -41,6 +41,9 @@ var POLL_INTERVAL_MS = 2000; // cancelled 兜底轮询间隔
 var TOAST_MS = 5000;
 var FILE_LIST_PREVIEW = 50; // 文件清单一屏预览条数
 
+// 任务 kind → 向导步骤映射（label 是人工步骤，无任务 kind，不参与接管）
+var TASK_KIND_TO_STEP = { score: "score", people: "people", build: "build", photo: "photo" };
+
 // ---- 全局状态 ----
 
 var state = {
@@ -52,6 +55,7 @@ var state = {
   sessionDirty: false, // 用户手改过场次 ID 后不再被扫描结果覆盖
   teamSkipped: false, // 队名步骤点了「跳过」
   runningTask: null, // { taskId, stepId } 全局同刻只跑一个任务
+  attachPromise: null, // 接管/提交任务的挂载期 Promise，防双挂面板竞态
   pendingTeamConfig: null, // 场次目录未建时的暂存队名 {team_name, opponent}
   lastSrcdir: null, // 上次使用的素材目录（/api/gui-state 记忆，gui-state-persist）
 };
@@ -151,9 +155,12 @@ function renderStepNav() {
   clear(list);
   STEPS.forEach(function (step, idx) {
     var li = el("li");
+    var isRunning = state.runningTask && state.runningTask.stepId === step.id;
     if (step.id === state.currentStep) li.classList.add("current");
-    if (stepDone(step.id)) li.classList.add("done");
-    var no = el("span", "step-no", stepDone(step.id) ? "✓" : String(idx + 1));
+    if (!isRunning && stepDone(step.id)) li.classList.add("done");
+    if (isRunning) li.classList.add("running");
+    var noText = isRunning ? "运行中" : (stepDone(step.id) ? "✓" : String(idx + 1));
+    var no = el("span", "step-no", noText);
     li.appendChild(no);
     li.appendChild(el("span", null, step.title));
     li.addEventListener("click", function () {
@@ -200,6 +207,7 @@ function refreshStatus() {
       flushPendingTeamConfig();
       renderStepNav();
       renderStep();
+      attachRunningTask();
       return st;
     })
     .catch(function (e) {
@@ -227,6 +235,7 @@ function resumeSession(session) {
       target = STEPS[i].id;
     }
     gotoStep(target);
+    attachRunningTask();
     toast("已续接场次：" + session, "success");
   });
 }
@@ -239,7 +248,8 @@ function gotoStep(stepId) {
 
 // ---- 任务进度面板（SSE + 轮询兜底） ----
 
-function buildTaskPanel(container) {
+function buildTaskPanel() {
+  var container = $("#task-dock");
   clear(container);
   var panel = el("div", "task-panel");
   var statusLine = el("div", "task-status running", "任务启动中…");
@@ -340,17 +350,31 @@ function updateFrameProgress(ui, ev) {
     "帧）";
 }
 
-function finishTask(ui, ok, message) {
-  ui.track.classList.remove("indeterminate");
-  ui.cancelBtn.disabled = true;
-  if (ok) {
-    ui.bar.style.width = "100%";
-    ui.statusLine.className = "task-status done";
-    ui.statusLine.textContent = message;
-  } else {
-    ui.statusLine.className = "task-status failed";
-    ui.statusLine.textContent = message;
+function finishTask(ui, ok, message, tail) {
+  // 面板仍挂载则刷新终态 UI 与失败展开日志；面板被 renderStep 等清掉（detach）时跳过 UI 更新
+  if (ui.panel && ui.panel.parentNode) {
+    ui.track.classList.remove("indeterminate");
+    ui.cancelBtn.disabled = true;
+    if (ok) {
+      ui.bar.style.width = "100%";
+      ui.statusLine.className = "task-status done";
+      ui.statusLine.textContent = message;
+    } else {
+      ui.statusLine.className = "task-status failed";
+      ui.statusLine.textContent = message;
+    }
+    if (tail) showFailureTail(ui, tail);
   }
+  // 全局 toast 与导航刷新不依赖面板在 document 中
+  if (ok) {
+    toast("任务完成", "success");
+  } else if (message === "任务已取消") {
+    toast("任务已取消");
+  } else {
+    toast(message, "error");
+  }
+  renderStepNav();
+  refreshStatus();
 }
 
 // 失败面板：可读错误 + 「展开日志」末尾日志
@@ -366,14 +390,19 @@ function showFailureTail(ui, tail) {
  * 跑一个流水线任务：提交 → SSE 消费 → 终态收尾。
  * submitFn 返回 Promise<{task_id}>；onDone(ok) 在终态回调（成功时通常 refreshStatus）。
  */
-function runTask(stepId, container, submitFn, onDone) {
+function runTask(stepId, submitFn, onDone) {
   if (state.runningTask) {
     toast("已有任务正在运行，请等待完成或先取消", "error");
     return;
   }
-  var ui = buildTaskPanel(container);
-  submitFn()
+  if (state.attachPromise) {
+    toast("已有任务正在接管或提交中，请稍候", "error");
+    return;
+  }
+  var ui = buildTaskPanel();
+  state.attachPromise = submitFn()
     .then(function (task) {
+      state.attachPromise = null; // 已挂载，后续由 state.runningTask 守卫
       var taskId = task.task_id;
       state.runningTask = { taskId: taskId, stepId: stepId };
       appendLog(ui.logBox, "任务已提交（ID: " + taskId + "）");
@@ -386,15 +415,15 @@ function runTask(stepId, container, submitFn, onDone) {
             toast(e.message, "error");
           });
       });
-      followTask(taskId, ui, function (ok, msg) {
+      followTask(taskId, ui, function (ok, msg, tail) {
         state.runningTask = null;
-        finishTask(ui, ok, msg);
+        finishTask(ui, ok, msg, tail);
         if (onDone) onDone(ok);
       });
     })
     .catch(function (e) {
-      finishTask(ui, false, e.message);
-      toast(e.message, "error");
+      state.attachPromise = null;
+      finishTask(ui, false, "任务失败（" + e.message + "）");
     });
 }
 
@@ -411,8 +440,7 @@ function followTask(taskId, ui, onTerminal) {
     finished = true;
     source.close();
     clearInterval(pollTimer);
-    if (tail) showFailureTail(ui, tail);
-    onTerminal(ok, msg);
+    onTerminal(ok, msg, tail);
   }
 
   source.onmessage = function (msg) {
@@ -478,6 +506,64 @@ function followTask(taskId, ui, onTerminal) {
         /* 轮询失败静默，等下一轮 */
       });
   }, POLL_INTERVAL_MS);
+}
+
+/**
+ * 自动接管运行中任务：页面刷新/续接场次/刷新状态后调用。
+ * 查询 /api/tasks 取 status=running 任务（同刻最多一个），按 kind 映射到步骤，
+ * 把面板挂到全局 task-dock 并 followTask；幂等，不重复挂同一任务。
+ */
+function attachRunningTask() {
+  // 幂等：已在接管状态，或正在挂载中，不重复挂
+  if (state.runningTask || state.attachPromise) return;
+  state.attachPromise = api("/api/tasks")
+    .then(function (data) {
+      var tasks = (data && data.tasks) || [];
+      var running = null;
+      for (var i = 0; i < tasks.length; i++) {
+        if (tasks[i].status === "running") {
+          running = tasks[i];
+          break;
+        }
+      }
+      if (!running) {
+        state.attachPromise = null;
+        return;
+      }
+      var stepId = TASK_KIND_TO_STEP[running.kind];
+      if (!stepId) {
+        state.attachPromise = null;
+        return;
+      }
+      var taskId = running.task_id;
+      // 异步返回期间若其他路径已设置同任务，避免重复挂
+      if (state.runningTask) {
+        state.attachPromise = null;
+        return;
+      }
+      var ui = buildTaskPanel();
+      ui.statusLine.textContent = "已接管运行中任务（ID: " + taskId + "）";
+      state.runningTask = { taskId: taskId, stepId: stepId };
+      state.attachPromise = null; // 已挂载，后续由 state.runningTask 守卫
+      renderStepNav();
+      ui.cancelBtn.addEventListener("click", function () {
+        api("/api/tasks/" + taskId + "/cancel", { method: "POST" })
+          .then(function () {
+            ui.cancelBtn.disabled = true;
+          })
+          .catch(function (e) {
+            toast(e.message, "error");
+          });
+      });
+      followTask(taskId, ui, function (ok, msg, tail) {
+        state.runningTask = null;
+        finishTask(ui, ok, msg, tail);
+      });
+    })
+    .catch(function (e) {
+      state.attachPromise = null;
+      console.warn("接管运行中任务失败:", e && e.message);
+    });
 }
 
 // ---- team-config 暂存（场次目录未建时 404，检测完成后补写） ----
@@ -755,8 +841,6 @@ function renderScoreStep(container) {
   var row = el("div", "button-row");
   row.appendChild(startBtn);
   container.appendChild(row);
-  var taskBox = el("div");
-  container.appendChild(taskBox);
 
   startBtn.addEventListener("click", function () {
     if (!state.session) {
@@ -773,7 +857,6 @@ function renderScoreStep(container) {
     if (batchInput.value) body.batch_size = parseInt(batchInput.value, 10);
     runTask(
       "score",
-      taskBox,
       function () {
         return postJson("/api/sessions/" + encodeURIComponent(state.session) + "/score", body);
       },
@@ -850,8 +933,6 @@ function renderPeopleStep(container) {
   var row = el("div", "button-row");
   row.appendChild(startBtn);
   container.appendChild(row);
-  var taskBox = el("div");
-  container.appendChild(taskBox);
   var linksBox = el("div");
   container.appendChild(linksBox);
   renderScorerLinks(linksBox);
@@ -861,7 +942,6 @@ function renderPeopleStep(container) {
     if (batchInput.value) body.batch = parseInt(batchInput.value, 10);
     runTask(
       "people",
-      taskBox,
       function () {
         return postJson("/api/sessions/" + encodeURIComponent(state.session) + "/people", body);
       },
@@ -927,7 +1007,6 @@ function renderBuildStep(container) {
   homeBtn.addEventListener("click", function () {
     runTask(
       "build",
-      taskBox,
       function () {
         return postJson("/api/sessions/" + encodeURIComponent(state.session) + "/build", {
           all: false,
@@ -943,7 +1022,6 @@ function renderBuildStep(container) {
   allBtn.addEventListener("click", function () {
     runTask(
       "build",
-      taskBox,
       function () {
         return postJson("/api/sessions/" + encodeURIComponent(state.session) + "/build", {
           all: true,
@@ -969,8 +1047,6 @@ function renderBuildStep(container) {
   var row = el("div", "button-row");
   row.appendChild(startBtn);
   container.appendChild(row);
-  var taskBox = el("div");
-  container.appendChild(taskBox);
   var outputBox = el("div");
   container.appendChild(outputBox);
   renderOutputs(outputBox);
@@ -989,7 +1065,6 @@ function renderBuildStep(container) {
     var body = { all: false, scorer: scorer, team: team };
     runTask(
       "build",
-      taskBox,
       function () {
         return postJson("/api/sessions/" + encodeURIComponent(state.session) + "/build", body);
       },
@@ -1035,13 +1110,10 @@ function renderPhotoStep(container) {
   container.appendChild(
     el("div", "notice info", "流程：① 生成确认页 → ② 打开确认页勾选照片 → ③ 回到这里点「导出精选」。")
   );
-  var taskBox = el("div");
-  container.appendChild(taskBox);
 
   genBtn.addEventListener("click", function () {
     runTask(
       "photo",
-      taskBox,
       function () {
         return postJson("/api/sessions/" + encodeURIComponent(state.session) + "/photo", { apply: false });
       },
@@ -1056,7 +1128,6 @@ function renderPhotoStep(container) {
   applyBtn.addEventListener("click", function () {
     runTask(
       "photo",
-      taskBox,
       function () {
         return postJson("/api/sessions/" + encodeURIComponent(state.session) + "/photo", { apply: true });
       },
@@ -1095,6 +1166,7 @@ function init() {
   renderStep();
   refreshSessions();
   initDiagnostics();
+  attachRunningTask();
   // srcdir 记忆（gui-state-persist）：启动拉取上次素材目录，新场次也免重填
   api("/api/gui-state")
     .then(function (gs) {
