@@ -24,8 +24,9 @@
     dist/basketball-clip/work|output|photos/   运行时生成（exe 同级，用户可写）
 
 打包流程会在 PyInstaller 删除 ``dist/basketball-clip/`` 之前，自动把 ``work/`` 和
-``output/`` 整体备份到 ``dist/_userdata_backup_<时间戳>/``；打包/补料完成后再移回原位。
-任何步骤失败时，finally 也会尝试把备份移回，避免用户数据停留在临时备份目录。
+``output/`` 整体备份到 ``packaging/build/_userdata_backup_<时间戳>/``；打包/补料完成后再移回原位。
+任何步骤失败时，finally 也会尝试把备份移回；若备份目录在恢复阶段消失则显式报错，不静默放行。
+同时通过 ``dist/.build.lock`` 防止并发打包。
 """
 
 from __future__ import annotations
@@ -51,6 +52,8 @@ FETCH_SCRIPT: Path = PACKAGING_DIR / "fetch_assets.py"
 BUILD_LOG: Path = PACKAGING_DIR / "build.log"
 DIST_DIR: Path = REPO_ROOT / "dist"
 BUILD_DIR: Path = REPO_ROOT / "build"
+LOCK_PATH: Path = DIST_DIR / ".build.lock"
+USERDATA_BACKUP_ROOT: Path = PACKAGING_DIR / "build"
 APP_NAME: str = "basketball-clip"
 
 PYINSTALLER_TIMEOUT_S: int = 3600  # 全量打包实测 3-5 分钟，给足余量
@@ -294,6 +297,57 @@ def run_inno(app_dir: Path) -> Path:
     return setup_exe
 
 
+def _is_pid_alive(pid: int) -> bool:
+    """检查给定 PID 是否仍在运行。
+
+    无法确认时保守视为存活，避免在权限受限场景下误删他人锁。
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    return True
+
+
+def _acquire_build_lock() -> None:
+    """获取构建锁：检查并发，写入 ``dist/.build.lock``。
+
+    Raises:
+        BuildError: 已有打包进程进行中，或无法写入锁文件。
+    """
+    DIST_DIR.mkdir(parents=True, exist_ok=True)
+    if LOCK_PATH.is_file():
+        try:
+            content = LOCK_PATH.read_text(encoding="utf-8").strip()
+            pid_str, started_at = content.split(" ", 1)
+            pid = int(pid_str)
+            if _is_pid_alive(pid):
+                raise BuildError(
+                    f"已有打包进程进行中（PID {pid}，启动于 {started_at}），拒绝并发打包"
+                )
+        except (ValueError, OSError) as e:
+            logger.warning("锁文件解析失败，视为陈旧锁覆盖: %s", e)
+    try:
+        LOCK_PATH.write_text(
+            f"{os.getpid()} {datetime.now().isoformat(timespec='seconds')}",
+            encoding="utf-8",
+        )
+    except OSError as e:
+        raise BuildError(f"无法写入构建锁: {LOCK_PATH}") from e
+    logger.info("已获取构建锁: %s", LOCK_PATH)
+
+
+def _release_build_lock() -> None:
+    """释放构建锁；任何错误只记录不抛出。"""
+    try:
+        LOCK_PATH.unlink(missing_ok=True)
+        logger.info("已释放构建锁: %s", LOCK_PATH)
+    except OSError as e:
+        logger.error("释放构建锁失败: %s: %s", LOCK_PATH, e)
+
+
 def _user_data_dirs(app_dir: Path) -> list[Path]:
     """返回需保护的运行时数据目录路径列表（按写死语义仅 work/output）。"""
     return [app_dir / name for name in USER_DATA_DIR_NAMES]
@@ -307,7 +361,7 @@ def _backup_user_data(app_dir: Path, backup_root: Path) -> Path | None:
 
     Args:
         app_dir: 当前包目录（如 dist/basketball-clip/）。
-        backup_root: 备份目录父目录（如 dist/）。
+        backup_root: 备份目录父目录（如 packaging/build/）。
 
     Returns:
         创建的备份目录；无数据需备份时返回 None。
@@ -380,8 +434,10 @@ def _restore_user_data(app_dir: Path, backup_dir: Path | None) -> set[str]:
         BuildError: 目标已存在同名目录，或移回失败。
     """
     restored: set[str] = set()
-    if backup_dir is None or not backup_dir.is_dir():
+    if backup_dir is None:
         return restored
+    if not backup_dir.is_dir():
+        raise BuildError(f"备份目录丢失：{backup_dir}（打包前曾成功备份，疑似被并发操作/清理删除）")
     logger.info("恢复用户数据: %s -> %s", backup_dir, app_dir)
     app_dir.mkdir(parents=True, exist_ok=True)
     for name in USER_DATA_DIR_NAMES:
@@ -411,7 +467,13 @@ def _restore_user_data_failsafe(app_dir: Path, backup_dir: Path | None) -> None:
         app_dir: 新包目录。
         backup_dir: 备份目录（可为 None）。
     """
-    if backup_dir is None or not backup_dir.is_dir():
+    if backup_dir is None:
+        return
+    if not backup_dir.is_dir():
+        logger.error(
+            "备份目录在恢复阶段消失：%s（打包前曾成功备份，疑似被并发操作/清理删除）",
+            backup_dir,
+        )
         return
     logger.info("兜底恢复用户数据: %s -> %s", backup_dir, app_dir)
     try:
@@ -446,9 +508,12 @@ def main(argv: list[str] | None = None) -> int:
     started = time.monotonic()
     app_dir = DIST_DIR / APP_NAME
     backup_dir: Path | None = None
+    lock_held = False
     try:
+        _acquire_build_lock()
+        lock_held = True
         ensure_assets()
-        backup_dir = _backup_user_data(app_dir, DIST_DIR)
+        backup_dir = _backup_user_data(app_dir, USERDATA_BACKUP_ROOT)
         run_pyinstaller()
         app_dir = DIST_DIR / APP_NAME
         stage_runtime_files(app_dir)
@@ -462,8 +527,12 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("打包失败: %s", e)
         return 1
     finally:
-        if backup_dir is not None:
-            _restore_user_data_failsafe(app_dir, backup_dir)
+        try:
+            if backup_dir is not None:
+                _restore_user_data_failsafe(app_dir, backup_dir)
+        finally:
+            if lock_held:
+                _release_build_lock()
     logger.info(
         "打包完成: %s（耗时 %.1f 分钟）", DIST_DIR / APP_NAME, (time.monotonic() - started) / 60
     )
