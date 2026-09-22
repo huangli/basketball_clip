@@ -59,14 +59,7 @@ from typing import TYPE_CHECKING, Any
 
 from errors import BasketballPipelineError, SchemaError
 from pipe_common import configure_logging, new_run_id, read_json
-from roster import (
-    OPPONENT_TAG,
-    Player,
-    format_key,
-    opponent_of,
-    player_from_dict,
-    validate_roster,
-)
+from roster import OPPONENT_TAG, Player, format_key, opponent_of, player_from_dict, validate_roster
 from team_config import DEFAULT_OPPONENT, TeamConfig, load_team_config
 
 if TYPE_CHECKING:
@@ -83,11 +76,11 @@ CLIP_MATCH_MAX_DT_SEC: float = 4.0
 STATUS_OK: str = "OK"
 STATUS_SKIP: str = "SKIP"
 
+TEAM_HOME_DEFAULT: str = DEFAULT_TEAM_NAME  # 未配置 team_config 时的主队名兜底
 TEAM_CASUAL: str = "便服"
-# 我方/对手队名不再硬编码：主队名由 team_config.json 会话级注入（main 读
-# work/<场次>/team_config.json，缺失回退 team_config.DEFAULT_TEAM_NAME），
-# 对手名 = 配置 opponent ＞ opponent_of(session) 场次 ID 后缀派生 ＞ 默认兜底
-OPPONENT_FALLBACK: str = DEFAULT_OPPONENT  # 无后缀且未配置 opponent 的兜底
+# 对手队名不再硬编码：配置 opponent > opponent_of(session) 从场次 ID 后缀派生
+# （黑/蓝球衣=对手队；2026-08-09 用户定前缀映射，2026-08-15 队名会话化）
+OPPONENT_FALLBACK: str = DEFAULT_OPPONENT  # 无后缀且未配置 opponent 时的兜底
 # 标签前缀 → 阵营（顺序即优先级；蓝色27 归对手系用户 2026-08-09 口径）
 _TEAM_PREFIXES: tuple[tuple[str, str], ...] = (
     ("黑", "opp"),
@@ -100,6 +93,85 @@ TEAM_GUESS_VALUES: tuple[str, ...] = ("黑", "白", "便服")
 # propagate_scorers 反向 import 本模块，直接引用会循环 import，故本地写死）
 TRACK_LINKS_VERSION: str = "track-v1"
 
+# 认人确认页键位映射（spec: docs/scorer-ux-redesign/spec.md §4.2）。
+# 选人序列 27 键；功能保留键显式排除，生成期断言二者不相交。
+PLAYER_KEYS: tuple[str, ...] = (
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    "Q",
+    "W",
+    "E",
+    "R",
+    "T",
+    "Y",
+    "U",
+    "I",
+    "A",
+    "D",
+    "F",
+    "H",
+    "J",
+    "K",
+    "L",
+    "C",
+    "V",
+    "B",
+)
+FUNCTION_KEYS: set[str] = {"O", "P", "S", "N", "M", "X", "Z", "G", "/"}
+if set(PLAYER_KEYS) & FUNCTION_KEYS:
+    raise ValueError("选人序列与功能保留键冲突")
+
+# 簇代表图墙最大展示数（spec §4.1 大裁图墙 ≤8）
+CLUSTER_CROP_WALL_MAX: int = 8
+
+
+def build_keymap(players: list[Player]) -> list[dict[str, Any]]:
+    """把名单球员按顺序映射到 27 个选人键（spec §4.2）。
+
+    前 27 名球员分配 ``PLAYER_KEYS``；超出的球员无键位（角标为空，仍可鼠标点）。
+    名单 ≤11 人时 ``E`` 未被占用，页面内作为 ``Enter`` 别名使用（spec 兼容口径）。
+
+    Args:
+        players: 球员名单（按页面显示顺序）。
+
+    Returns:
+        每个球员对应的键位描述列表，元素含 ``tag``/``name``/``team``/``key``；
+        无键位时 ``key`` 为空串。
+    """
+    result: list[dict[str, Any]] = []
+    for i, p in enumerate(players):
+        key = PLAYER_KEYS[i] if i < len(PLAYER_KEYS) else ""
+        result.append({"tag": p.tag, "name": p.name, "team": p.team, "key": key})
+    return result
+
+
+def cluster_sort_key(
+    keys: list[str],
+    entry_by_key: dict[str, dict[str, Any]],
+) -> tuple[int, float]:
+    """簇队列排序键：球数降序，同数按首球锚点时间升序（spec §4.1）。
+
+    Args:
+        keys: 簇内条目 key 列表。
+        entry_by_key: key → 页面条目的索引（必须包含 keys）。
+
+    Returns:
+        可用于 ``sorted(..., key=...)`` 的元组 ``(-球数, 首球时间)``。
+
+    Raises:
+        KeyError: keys 中引用不在索引里的 key（防御，调用方应保证）。
+    """
+    first_anchor = min(float(entry_by_key[k]["anchor_time"]) for k in keys)
+    return (-len(keys), first_anchor)
+
+
 _HTML = """<!DOCTYPE html>
 <html lang="zh">
 <head>
@@ -108,295 +180,274 @@ _HTML = """<!DOCTYPE html>
 <style>
 body { font-family: sans-serif; background: #111; color: #eee; margin: 16px; }
 #bar { position: sticky; top: 0; background: #111; padding: 8px 0; z-index: 9; }
-button { font-size: 18px; padding: 10px 18px; margin: 4px; border-radius: 8px;
+button { font-size: 16px; padding: 8px 14px; margin: 3px; border-radius: 6px;
          border: 0; cursor: pointer; }
 button.sel { outline: 3px solid #fc3; }
 .team-opp { background: #222; color: #fff; border: 1px solid #666; }
 .team-home { background: #eee; color: #111; }
 .team-casual { background: #777; color: #fff; }
-.teamlabel { color: #aaa; margin-right: 6px; }
 .nav { background: #444; color: #fff; }
 #skip { background: #7a5c00; color: #fff; }
 #nogoal { background: #7a2c2c; color: #fff; }
 #accept { background: #2c9e4b; color: #fff; }
-/* 照片候选角标：读号/照片冲突时显示，点击改用照片归属（docs/photo-roster T5） */
-#photoaccept { background: #0f6e6e; color: #fff; }
 #export { background: #8a6d00; color: #fff; }
-#go { background: #2c9e4b; color: #fff; }
-#free { font-size: 18px; padding: 8px; width: 10em; background: #222;
-        color: #eee; border: 1px solid #555; border-radius: 8px; }
-.stepbar { color: #fc3; font-size: 14px; margin: 10px 0 2px; }
-.stepbar small { color: #999; margin-left: 8px; font-size: 12px; }
-.renamebtn { font-size: 12px; padding: 4px 8px; }
-#reviewbar { margin: 4px 0; }
-#reviewbar button { font-size: 14px; padding: 6px 10px; }
-/* 逐球区：图/视频定高不定宽顶端对齐（68vh 等高、翻球不跳、无黑边——
-   固定框留边方案有黑边已证伪，docs/scorer-three-step/spec.md Objective 第 5 条） */
+#undo { background: #3a5a8a; color: #fff; }
+.badge { color: #fc3; }
+small { color: #999; }
+#stage { color: #fc3; font-size: 18px; margin: 8px 0; }
+#rosterTable { display: none; background: #1a1a1a; border: 1px solid #333;
+               border-radius: 8px; padding: 8px; margin: 8px 0; }
+#rosterTable table { width: 100%; border-collapse: collapse; }
+#rosterTable th, #rosterTable td { padding: 6px; border-bottom: 1px solid #333;
+                                   text-align: left; }
+#rosterTable input { background: #222; color: #eee; border: 1px solid #555;
+                     padding: 4px; font-size: 14px; }
+#rosterTable select { background: #222; color: #eee; border: 1px solid #555;
+                      padding: 4px; font-size: 14px; }
+#oppInput { background: #222; color: #eee; border: 1px solid #555; padding: 4px;
+            font-size: 14px; width: 8em; }
+.keycap { font-size: 10px; color: #fc3; margin-left: 4px; }
+.hintbar { color: #aaa; font-size: 14px; margin: 6px 0; line-height: 1.6; }
+#clusterView, #ballView { display: none; }
+#clusterCrops { display: flex; flex-wrap: wrap; gap: 6px; }
+#clusterCrops img { height: 22vh; width: auto; background: #000; border-radius: 4px; }
+#clusterCrops img.eject-sel { outline: 3px solid #fc3; }
+#clusterVideoWrap { margin: 8px 0; }
+#clusterVideo { height: 34vh; width: auto; background: #000; }
+.playerbtn { position: relative; font-size: 16px; }
+.playerbtn .keycap { position: absolute; top: -4px; right: -4px; background: #fc3;
+                     color: #000; border-radius: 4px; padding: 1px 4px;
+                     font-weight: bold; }
 #review { display: flex; align-items: flex-start; gap: 8px; }
 #review #crop { height: 68vh; width: auto; background: #000; }
 #review video { height: 68vh; width: auto; background: #000; }
-.badge { color: #fc3; }
-small { color: #999; }
-#clusters { margin: 8px 0; }
-.cluster-row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px;
-               background: #1c1c1c; border: 1px solid #333; border-radius: 8px;
-               padding: 6px; margin: 6px 0; }
-.cluster-row img.rep { max-height: 120px; max-width: 160px; background: #000; }
-.clusterlabel { color: #fc3; margin: 0 8px; }
-.cluster-row { cursor: grab; }
-.cluster-row.drop-target { outline: 3px dashed #fc3; }
-.cluster-row.merge-src { outline: 3px solid #fc3; }
-.teamrow.drop-target { outline: 3px dashed #fc3; }
-.cluster-row button { font-size: 14px; padding: 6px 10px; }
-.picker { background: #2a2a12; border: 1px solid #fc3; border-radius: 8px;
-          padding: 6px; margin: 4px 0; width: 100%; }
-.picker .hint { color: #fc3; margin-right: 8px; }
-.cluster-row.collapsed img.rep { max-height: 48px; max-width: 64px; }
-.cluster-row .foldbtn { font-size: 12px; padding: 2px 8px; }
-/* 悬停放大浮层：置于样式表末尾——#review #crop:hover 特异度压过 #review #crop；
-   .cluster-row img.rep:hover 与 .cluster-row.collapsed img.rep 同特异度靠后写胜出
-   （点击放大已证伪；移开即收回） */
-#review #crop:hover, .cluster-row img.rep:hover {
+#review #crop:hover {
   position: fixed; z-index: 99; left: 50%; top: 50%;
   transform: translate(-50%, -50%);
   height: 92vh; width: auto; max-width: 96vw; max-height: 96vh;
   outline: 3px solid #fc3; background: #000;
 }
+#mergeTargets { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.merge-target { opacity: 0.6; cursor: pointer; border: 1px solid #444;
+                border-radius: 6px; padding: 4px; }
+.merge-target.sel { opacity: 1; outline: 3px solid #fc3; }
+.merge-target img { height: 64px; width: auto; background: #000; }
+#ballFilter { margin: 6px 0; }
+.toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+         background: #333; color: #fff; padding: 10px 20px; border-radius: 8px;
+         z-index: 99; display: none; }
 </style>
 </head>
 <body>
 <div id="bar">
-  <span id="prog"></span> <span class="badge" id="cur"></span><br>
-  <div class="stepbar">第一步：判队伍<small>拖队员到正确队伍行，点"改名"填真名</small></div>
-  <span id="players"></span>
-  <input id="free" placeholder="自由输入标签"><button id="go">归属 (回车)</button>
-  <button id="accept" style="display:none"></button>
-  <button id="photoaccept" style="display:none"></button>
-  <button id="oppmark" class="team-opp" title="该球是对手进的：一键归属对手">标为对手</button>
-  <button id="acceptall"
-    title="对所有号码/照片预填无歧义且未手改的球批量预填归属（不标已核，第三步可翻检）"
-  >接受全部号码预填</button>
-  <button id="acceptopp" class="team-opp"
-    title="对所有球衣识别为黑色的球批量归属对手（不标已核，第三步可翻检；有误判请逐球改回）"
-  >接受全部对手预填</button>
-  <button id="skip">跳过 (S)</button>
-  <button id="nogoal">不算进球 (N)</button>
-  <button class="nav" id="prev">← 上一个</button>
-  <button class="nav" id="next">下一个 →</button>
-  <button class="nav" id="toun">跳到未归属</button>
+  <span id="prog"></span>
   <button id="export">导出 roster.json</button>
-  <br><small>按键：1-9=选球员 E=采用号码预填 S=跳过 N=不算进球
-  ←/→=翻页；SKIP 球标"无法定位"可手选</small>
-  <small>进度自动存 localStorage，刷新回到上次位置；导出文件名 roster.json</small>
+  <button id="undo">撤销 (Z)</button>
+  <button id="toggleroster">名单 (G)</button>
+  <button id="modebtn">模式 /</button>
+  <button id="acceptopp">接受全部对手预填</button>
+  <label>对手队名：<input id="oppInput" type="text" placeholder="自动派生"></label>
+  <br><small id="keyhint"></small>
 </div>
-<div class="stepbar" id="step2">第二步：并簇认人<small>同人的簇拖到一起，点队员名应用到整组；
-误分组的簇点"删除"移除（不动球和归属）</small></div>
-<div id="clusters"></div>
-<div class="stepbar">第三步：逐球核对<small>选核对对象，判错直接点正确球员</small></div>
-<div id="reviewbar"></div>
-<div id="review">
-<img id="crop" alt="投篮者裁图">
-<video id="v" autoplay loop muted playsinline></video>
+<div id="rosterTable"></div>
+<div id="stage"></div>
+<div id="clusterView">
+  <div id="clusterMeta"></div>
+  <div id="clusterCrops"></div>
+  <div id="clusterVideoWrap"><video id="clusterVideo" autoplay loop muted playsinline></video></div>
+  <div id="clusterPlayers"></div>
+  <div id="clusterHint" class="hintbar"></div>
+  <div id="mergeTargets"></div>
 </div>
+<div id="ballView">
+  <div id="ballInfo"></div>
+  <div id="review">
+    <img id="crop" alt="投篮者裁图">
+    <video id="v" autoplay loop muted playsinline></video>
+  </div>
+  <div id="ballPlayers"></div>
+  <div id="ballFilter"></div>
+</div>
+<div id="toast" class="toast"></div>
 <script>
 const ITEMS = __ITEMS__;
 const PLAYERS = __PLAYERS__;
+const KEYMAP = __KEYMAP__;
+const PLAYER_KEYS = __PLAYER_KEYS__;
 const EXISTING = __EXISTING__;
 const EXPLAYERS = __EXPLAYERS__;
 const CLUSTERS = __CLUSTERS__;
 const SESSION = "__SESSION__";
-const OPP = __OPP__;
-const OPP_TAG = __OPP_TAG__;  // 伪球员"对手"标签（opponent-filter T2；roster.py OPPONENT_TAG 注入）
+let OPP = __OPP__;
+const OPP_TAG = __OPP_TAG__;
 const HOME = __HOME__;
 const LSKEY = "scorer_" + SESSION;
-const POSKEY = LSKEY + "_pos";
 const TOUCHKEY = LSKEY + "_touched";
-// 不算进球哨兵标签：假进球/犯规不算的球归到这里——只在页面内流转，
-// 导出 roster 时剔除（assignments/players 都不含），不挡 confirmed；可逆（改归球员即恢复）
-const NOGOAL = "不算进球";
-let marks = {};
-try { marks = JSON.parse(localStorage.getItem(LSKEY) || "{}"); } catch (e) { marks = {}; }
-// 已有 roster 归属作底，本页改动覆盖之（用户在页面上的修改是终裁）
-marks = Object.assign({}, EXISTING, marks);
-// touched = 逐球手动改过的 key（簇级批量预填不得覆盖；独立 localStorage 键，
-// 不动既有 marks 存储格式）
-let touched = {};
-try { touched = JSON.parse(localStorage.getItem(TOUCHKEY) || "{}"); } catch (e) { touched = {}; }
 const PROPKEY = LSKEY + "_propagate";
-// 传播预填 provenance：用户逐球归属时沿同轨迹自动写入 marks 的 key 集合
-// （"同轨迹预填"徽标判定用；独立 localStorage 键，读回合并写与 touched 同模式）
-let propagateAssign = {};
-try { propagateAssign = JSON.parse(localStorage.getItem(PROPKEY) || "{}"); }
-catch (e) { propagateAssign = {}; }
 const CLSTATE_KEY = LSKEY + "_clusters";
-// 簇合并页面态：merges=被并cid→组id，clAssign=组id→tag（仅作合并预填来源，
-// 显示/折叠判定一律以 marks 为准），collapsed=显式折叠（true/false 都存），
-// deleted=删簇墓碑（gid→true，只加不减；删的是显示组，不动球和归属）
-let clState = { merges: {}, clAssign: {}, collapsed: {}, deleted: {} };
-try {
-  const rawCl = JSON.parse(localStorage.getItem(CLSTATE_KEY) || "{}");
-  if (rawCl && typeof rawCl === "object") {
-    for (const sub of ["merges", "clAssign", "collapsed", "deleted"]) {
-      if (rawCl[sub] && typeof rawCl[sub] === "object") clState[sub] = rawCl[sub];
+const TEAMOVR_KEY = LSKEY + "_teamovr";
+const NAMES_KEY = LSKEY + "_names";
+const OPPNAME_KEY = LSKEY + "_oppname";
+const POOLKEY = LSKEY + "_pool";
+const NOGOAL = "不算进球";
+const OPPONENT_TAG = __OPP_TAG__;
+
+const itemByKey = {};
+for (const it of ITEMS) itemByKey[it.key] = it;
+
+let marks = {};
+let touched = {};
+let propagateAssign = {};
+let clState = { merges: {}, clAssign: {}, collapsed: {}, deleted: {}, done: {} };
+let teamOvr = {};
+let nameOvr = {};
+let oppNameOvr = "";
+let pool = [];
+let undoStack = [];
+let mode = "cluster";
+let curClusterIdx = 0;
+let curBallIdx = 0;
+let clusterOrder = [];
+let mergeState = null;
+let ejectState = null;
+let rosterExpanded = false;
+let ballFilter = "";
+
+function loadJson(key, fallback) {
+  try { return JSON.parse(localStorage.getItem(key) || "null") || fallback; }
+  catch (e) { return fallback; }
+}
+function loadStorage() {
+  marks = loadJson(LSKEY, {});
+  marks = Object.assign({}, EXISTING, marks);
+  touched = loadJson(TOUCHKEY, {});
+  propagateAssign = loadJson(PROPKEY, {});
+  clState = loadJson(CLSTATE_KEY, {});
+  if (!clState || typeof clState !== "object") clState = {};
+  clState = {
+    merges: clState.merges || {},
+    clAssign: clState.clAssign || {},
+    collapsed: clState.collapsed || {},
+    deleted: clState.deleted || {},
+    done: clState.done || {},
+  };
+  teamOvr = loadJson(TEAMOVR_KEY, {});
+  nameOvr = loadJson(NAMES_KEY, {});
+  oppNameOvr = (localStorage.getItem(OPPNAME_KEY) || "").trim();
+  pool = loadJson(POOLKEY, []);
+  if (!Array.isArray(pool)) pool = [];
+  for (const p of PLAYERS) {
+    if (teamOvr[p.tag] !== undefined) p.team = teamOvr[p.tag];
+    if (nameOvr[p.tag] !== undefined) p.name = nameOvr[p.tag];
+  }
+  const baseOpp = OPP;
+  if (oppNameOvr) OPP = oppNameOvr;
+  for (const tag of Object.keys(teamOvr)) {
+    if (teamOvr[tag] === baseOpp) teamOvr[tag] = OPP;
+  }
+  for (const p of PLAYERS) { if (p.team === baseOpp) p.team = OPP; }
+  migrateOldPosReview();
+}
+function migrateOldPosReview() {
+  let cleared = false;
+  for (const k of Object.keys(localStorage)) {
+    if (k === LSKEY + "_review" || k.startsWith(LSKEY + "_pos")) {
+      localStorage.removeItem(k);
+      cleared = true;
     }
   }
-} catch (e) { clState = { merges: {}, clAssign: {}, collapsed: {}, deleted: {} }; }
-let pickerGid = null; // 合并弹条：非 null = 该组行正弹选人条
-let collapseAll = null; // 总开关：null=随规则 / true=全折 / false=全展（瞬态，刷新回规则；
-                        // 点击后 null→true→false→true… 两态循环回不到"随规则"系有意
-                        // 为之——回规则态靠刷新，spec 未要求三态）
-let mergeSrc = null; // 点选合并：非 null = 该 gid 组已被点为源（瞬态，刷新即清；
-                     // 与拖拽并存，合并语义复用 mergeInto）
-const TEAMOVR_KEY = LSKEY + "_teamovr";
-// 队员改队覆盖：{ tag: team }；改队直接写 PLAYERS 内存值，导出自动跟随
-let teamOvr = {};
-try { teamOvr = JSON.parse(localStorage.getItem(TEAMOVR_KEY) || "{}"); }
-catch (e) { teamOvr = {}; }
-for (const p of PLAYERS) {
-  if (teamOvr[p.tag] !== undefined) p.team = teamOvr[p.tag];
+  if (cleared) toast("旧进度已迁移，位置从头开始");
+}
+function save() {
+  localStorage.setItem(LSKEY, JSON.stringify(marks));
+  localStorage.setItem(TOUCHKEY, JSON.stringify(touched));
+  localStorage.setItem(PROPKEY, JSON.stringify(propagateAssign));
+}
+function saveClState() {
+  localStorage.setItem(CLSTATE_KEY, JSON.stringify(clState));
 }
 function saveTeamOvr() {
-  // 读回再合并写，防多开页面互踩（沿用 save() 模式）
-  let stored = {};
-  try { stored = JSON.parse(localStorage.getItem(TEAMOVR_KEY) || "{}"); }
-  catch (e) { stored = {}; }
-  teamOvr = Object.assign(stored, teamOvr);
   localStorage.setItem(TEAMOVR_KEY, JSON.stringify(teamOvr));
 }
-function changeTeam(tag, team) {
-  // 拖拽改队：只动队别（分队合集/分行/着色），不碰任何 marks 归属
-  const p = PLAYERS.find(x => x.tag === tag);
-  if (!p || p.team === team) return; // 原队行 drop = 无操作
-  p.team = team;
-  teamOvr[tag] = team;
-  saveTeamOvr();
-  show(cur);
-}
-const NAMES_KEY = LSKEY + "_names";
-// 页内改真名覆盖：{ tag: name }；清空真名=写空串不删键（读回合并写会复活删键，
-// saveClState 前科），加载时空串视为无真名
-let nameOvr = {};
-try { nameOvr = JSON.parse(localStorage.getItem(NAMES_KEY) || "{}"); }
-catch (e) { nameOvr = {}; }
-for (const p of PLAYERS) {
-  if (nameOvr[p.tag] !== undefined) p.name = nameOvr[p.tag];
-}
 function saveNames() {
-  // 读回再合并写，防多开页面互踩（沿用 save() 模式）
-  let stored = {};
-  try { stored = JSON.parse(localStorage.getItem(NAMES_KEY) || "{}"); }
-  catch (e) { stored = {}; }
-  nameOvr = Object.assign(stored, nameOvr);
   localStorage.setItem(NAMES_KEY, JSON.stringify(nameOvr));
 }
-function renamePlayer(tag) {
-  // 只改真名不改标签（tag 是归属键，级联风险）；三态：非空=改 / 空串=清 / 取消=不动；
-  // 四处按钮文字（队伍区主行/兜底行/簇区/弹条）都读 p.name，改内存值 show 即全刷
-  const p = PLAYERS.find(x => x.tag === tag);
-  if (!p) return;
-  const v = prompt("真名（空=清除）", p.name);
-  if (v === null) return;
-  p.name = v.trim();
-  nameOvr[tag] = p.name;
+function saveOppName() {
+  localStorage.setItem(OPPNAME_KEY, oppNameOvr);
+}
+function savePool() {
+  localStorage.setItem(POOLKEY, JSON.stringify(pool));
+}
+function snapshotState() {
+  return {
+    marks: Object.assign({}, marks),
+    touched: Object.assign({}, touched),
+    propagateAssign: Object.assign({}, propagateAssign),
+    clState: {
+      merges: Object.assign({}, clState.merges),
+      clAssign: Object.assign({}, clState.clAssign),
+      collapsed: Object.assign({}, clState.collapsed),
+      deleted: Object.assign({}, clState.deleted),
+      done: Object.assign({}, clState.done),
+    },
+    teamOvr: Object.assign({}, teamOvr),
+    nameOvr: Object.assign({}, nameOvr),
+    oppNameOvr: oppNameOvr,
+    pool: pool.slice(),
+    mode: mode,
+    curClusterIdx: curClusterIdx,
+    curBallIdx: curBallIdx,
+    clusterOrder: clusterOrder.slice(),
+    ballFilter: ballFilter,
+  };
+}
+function pushUndo(label) {
+  if (undoStack.length >= 50) undoStack.shift();
+  undoStack.push({ label, state: snapshotState() });
+}
+function undo() {
+  if (!undoStack.length) { toast("无可撤销"); return; }
+  const snap = undoStack.pop().state;
+  marks = snap.marks;
+  touched = snap.touched;
+  propagateAssign = snap.propagateAssign;
+  clState = snap.clState;
+  teamOvr = snap.teamOvr;
+  nameOvr = snap.nameOvr;
+  oppNameOvr = snap.oppNameOvr;
+  pool = snap.pool;
+  mode = snap.mode;
+  curClusterIdx = snap.curClusterIdx;
+  curBallIdx = snap.curBallIdx;
+  clusterOrder = snap.clusterOrder;
+  ballFilter = snap.ballFilter;
+  for (const p of PLAYERS) {
+    p.team = teamOvr[p.tag] !== undefined ? teamOvr[p.tag] : p.team;
+    p.name = nameOvr[p.tag] !== undefined ? nameOvr[p.tag] : p.name;
+  }
+  OPP = oppNameOvr || OPP;
+  save();
+  saveClState();
+  saveTeamOvr();
   saveNames();
-  show(cur);
+  saveOppName();
+  savePool();
+  toast("已撤销");
+  render();
 }
-const REVIEW_KEY = LSKEY + "_review";
-// 按人核对：{ target: "" }；""=全部（切回全部=写空串不删键，理由同 names 键），
-// "__none__"=未归属，其余=球员 tag（含名单外自由输入 tag，无 name 纯显示 tag）
-let review = { target: "" };
-try {
-  const rawR = JSON.parse(localStorage.getItem(REVIEW_KEY) || "{}");
-  if (rawR && typeof rawR === "object" && typeof rawR.target === "string") {
-    review.target = rawR.target;
-  }
-} catch (e) { review = { target: "" }; }
-function saveReview() {
-  // 读回再合并写（沿用 save() 模式）
-  let stored = {};
-  try { stored = JSON.parse(localStorage.getItem(REVIEW_KEY) || "{}"); }
-  catch (e) { stored = {}; }
-  review = Object.assign(stored, review);
-  localStorage.setItem(REVIEW_KEY, JSON.stringify(review));
+function teamOfTag(tag) {
+  if (tag === OPPONENT_TAG) return OPP;
+  if (tag.startsWith("黑") || tag.startsWith("蓝")) return OPP;
+  if (tag.startsWith("白")) return HOME;
+  return "便服";
 }
-function reviewTargets() {
-  // 核对对象候选 = 当前 marks 里有归属球的 tag（按 ITEMS 序去重；含名单外 tag）
-  const seen = [];
-  for (const it of ITEMS) {
-    const t = marks[it.key];
-    if (t && !seen.includes(t)) seen.push(t);
-  }
-  return seen;
+function teamClass(team) {
+  if (team === HOME) return "team-home";
+  if (team === "便服") return "team-casual";
+  return "team-opp";
 }
-function visible() {
-  // 可见集 = 按核对对象过滤的 ITEMS 子集；ITEMS 本体不动（spec 边界）
-  if (review.target === "") return ITEMS;
-  if (review.target === "__none__") return ITEMS.filter(it => !marks[it.key]);
-  return ITEMS.filter(it => marks[it.key] === review.target);
-}
-function posKey() {
-  // 位置按核对对象分键（不同对象下同索引指向不同球，不分键会错位）；
-  // 全部沿用旧 _pos 键兼容存量
-  return review.target === "" ? POSKEY
-    : POSKEY + "_" + encodeURIComponent(review.target);
-}
-function reviewTarget(tag) {
-  // 切核对对象：持久 + 定位（有位置记录回记录；无则按人=第一个球，
-  // 全部/未归属=第一个未归属球）；集空交给 show 的空态分支回退全部
-  review.target = tag;
-  saveReview();
-  const vis = visible();
-  let start = parseInt(localStorage.getItem(posKey()) || "-1", 10);
-  if (isNaN(start) || start < 0 || start >= vis.length) {
-    start = (tag !== "" && tag !== "__none__")
-      ? 0 : vis.findIndex(it => !marks[it.key]);
-  }
-  show(start >= 0 ? start : 0);
-}
-function renderReviewBar() {
-  // 核对对象行：全部 / 各已归属球员（marks 里有球才列）/ 未归属；选中态 sel 高亮
-  const bar = document.getElementById("reviewbar");
-  bar.innerHTML = "";
-  const lab = document.createElement("span");
-  lab.textContent = "核对对象：";
-  lab.className = "teamlabel";
-  bar.appendChild(lab);
-  const mk = (text, target) => {
-    const b = document.createElement("button");
-    b.textContent = text;
-    b.className = "nav";
-    if (review.target === target) b.classList.add("sel");
-    b.onclick = () => reviewTarget(target);
-    bar.appendChild(b);
-  };
-  mk("全部", "");
-  for (const t of reviewTargets()) {
-    const p = PLAYERS.find(x => x.tag === t);
-    mk(t + (p && p.name ? "=" + p.name : ""), t);
-  }
-  mk("未归属", "__none__");
-}
-function saveClState(del) {
-  // 子键分别读回再合并写（嵌套对象整体浅合并会丢多页防护粒度；spec 数据契约）；
-  // del = { merges: [...], clAssign: [...] } 待删键——读回合并会把本地已删的键
-  // 从 stored 复活，必须在合并后再删（拆开/合并吸收依赖此语义）
-  //（deleted 墓碑只加不减，del 清单无需扩展）
-  let stored = {};
-  try { stored = JSON.parse(localStorage.getItem(CLSTATE_KEY) || "{}"); }
-  catch (e) { stored = {}; }
-  const merged = {
-    merges: Object.assign({}, stored.merges || {}, clState.merges),
-    clAssign: Object.assign({}, stored.clAssign || {}, clState.clAssign),
-    collapsed: Object.assign({}, stored.collapsed || {}, clState.collapsed),
-    deleted: Object.assign({}, stored.deleted || {}, clState.deleted),
-  };
-  for (const k of (del && del.merges) || []) delete merged.merges[k];
-  for (const k of (del && del.clAssign) || []) delete merged.clAssign[k];
-  clState = merged;
-  localStorage.setItem(CLSTATE_KEY, JSON.stringify(merged));
-}
+function nDone() { return ITEMS.filter(it => marks[it.key]).length; }
 function groupIdOf(cid) {
-  // 沿 merges 链解析最终组 id；环防御：visited 集合，成环即停不报错
   let cur = String(cid);
   const seen = new Set([cur]);
   while (clState.merges[cur] !== undefined &&
@@ -408,7 +459,6 @@ function groupIdOf(cid) {
   return isNaN(gid) ? cid : gid;
 }
 function computeGroups() {
-  // CLUSTERS → 显示组：keys/rep_crops 按原簇序拼接；组位置 = gid 原簇原位
   const byGid = new Map();
   for (const cl of CLUSTERS) {
     const gid = groupIdOf(cl.cluster_id);
@@ -419,187 +469,210 @@ function computeGroups() {
     g.rep_crops = g.rep_crops.concat(cl.rep_crops);
   }
   const pos = new Map(CLUSTERS.map((cl, i) => [cl.cluster_id, i]));
-  // ?? 0 兜底：localStorage 残留失效簇 id 时 pos.get 为 undefined，防 NaN 序不稳
-  // 删簇墓碑过滤在折叠成显示组之后：删的是用户肉眼所见的行；
-  // merges 链不动（groupIdOf 照常解析，逐球区"簇#N"标注保留）
   return [...byGid.values()]
     .filter(g => !clState.deleted[String(g.gid)])
     .sort((a, b) => (pos.get(a.gid) ?? 0) - (pos.get(b.gid) ?? 0));
 }
-function groupTag(g) {
-  // 组内非空 marks 众数（显示"归的人"唯一口径；不读 clAssign）
+function groupItems(g) {
+  return g.keys.map(k => itemByKey[k]).filter(Boolean)
+    .sort((a, b) => (a.file + a.anchor_time).localeCompare(b.file + b.anchor_time));
+}
+function clusterColorGuess(g) {
   const counts = {};
-  let assigned = 0;
   for (const k of g.keys) {
-    const t = marks[k];
-    if (t) { counts[t] = (counts[t] || 0) + 1; assigned++; }
+    const it = itemByKey[k];
+    if (it && it.team_guess) counts[it.team_guess] = (counts[it.team_guess] || 0) + 1;
   }
   let best = "", n = 0;
-  for (const t of Object.keys(counts)) {
-    if (counts[t] > n) { n = counts[t]; best = t; }
+  for (const t of Object.keys(counts)) { if (counts[t] > n) { n = counts[t]; best = t; } }
+  return { color: best, count: n };
+}
+function clusterNumberVotes(g) {
+  const counts = {};
+  for (const k of g.keys) {
+    const it = itemByKey[k];
+    const num = it && it.number_guess ? it.number_guess.number : null;
+    if (num) counts[num] = (counts[num] || 0) + 1;
   }
-  return { tag: best, mixed: Object.keys(counts).length > 1, assigned };
+  return Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([num, c]) => num + "×" + c).join(", ") || "无";
 }
-let cur = 0;
-function save() {
-  // 合并写入：先读回存储与本页记录合并再写，防止同时开多个页面互相覆盖
-  let stored = {};
-  try { stored = JSON.parse(localStorage.getItem(LSKEY) || "{}"); } catch (e) { stored = {}; }
-  marks = Object.assign(stored, marks);
-  localStorage.setItem(LSKEY, JSON.stringify(marks));
-  let storedTouched = {};
-  try { storedTouched = JSON.parse(localStorage.getItem(TOUCHKEY) || "{}"); }
-  catch (e) { storedTouched = {}; }
-  touched = Object.assign(storedTouched, touched);
-  localStorage.setItem(TOUCHKEY, JSON.stringify(touched));
-  let storedProp = {};
-  try { storedProp = JSON.parse(localStorage.getItem(PROPKEY) || "{}"); }
-  catch (e) { storedProp = {}; }
-  propagateAssign = Object.assign(storedProp, propagateAssign);
-  localStorage.setItem(PROPKEY, JSON.stringify(propagateAssign));
+function clusterAssignedCount(g) {
+  return g.keys.filter(k => marks[k]).length;
 }
-function teamOfTag(tag) {
-  // 与 Python 端 team_of_tag 同规则：标签前缀定队，黑/蓝→对手队（OPP），白→主队（HOME），其余便服
-  if (tag === OPP_TAG) return OPP;  // 伪球员"对手"特判：固定对手队，不落便服
-  if (tag.startsWith("黑") || tag.startsWith("蓝")) return OPP;
-  if (tag.startsWith("白")) return HOME;
-  return "便服";
-}
-function teamClass(team) {
-  // 队名→CSS 语义类：任意对手/主队队名都能渲染（队名随场次配置，类名固定）
-  if (team === HOME) return "team-home";
-  if (team === "便服") return "team-casual";
-  return "team-opp";
-}
-function nDone() { return ITEMS.filter(it => marks[it.key]).length; }
-function renderPlayers() {
-  // 按队分行（对手队 OPP/主队 HOME/便服），找人不用扫全名单（2026-08-09 用户要求）
-  const box = document.getElementById("players");
-  box.innerHTML = "";
-  const vis = visible(); // sel 高亮读可见集当前项（按人核对时 ITEMS[cur] 不是当前球）
-  const curKey = vis.length && cur < vis.length ? vis[cur].key : null;
-  const numbered = PLAYERS.map((p, idx) => [p, idx]);
-  const KNOWN_TEAMS = [OPP, HOME, "便服"];
-  for (const tm of KNOWN_TEAMS) {
-    const row = numbered.filter(([p]) => p.team === tm);
-    // 三行恒渲染（空队也渲染行，否则该队零队员时无处可拖入）
-    const div = document.createElement("div");
-    div.className = "teamrow";
-    div.dataset.team = tm;
-    div.ondragover = (ev) => {
-      // 只响应队员拖拽（text/player-tag）；簇行拖拽（text/plain）不高亮
-      if (!ev.dataTransfer.types.includes("text/player-tag")) return;
-      ev.preventDefault();
-      div.classList.add("drop-target");
-    };
-    div.ondragleave = () => div.classList.remove("drop-target");
-    div.ondrop = (ev) => {
-      ev.preventDefault();
-      div.classList.remove("drop-target");
-      const tag = ev.dataTransfer.getData("text/player-tag");
-      if (tag) changeTeam(tag, tm);
-    };
-    const lab = document.createElement("span");
-    lab.textContent = tm + "：";
-    lab.className = "teamlabel";
-    div.appendChild(lab);
-    for (const [p, idx] of row) {
-      const b = document.createElement("button");
-      b.textContent = (idx < 9 ? (idx + 1) + " " : "") + p.tag +
-        (p.name ? "=" + p.name : "");
-      b.className = teamClass(p.team);
-      b.draggable = true;
-      b.ondragstart = (ev) => {
-        // 自定义 MIME：与簇行拖拽的 text/plain 隔离，防跨域误触发
-        ev.dataTransfer.setData("text/player-tag", p.tag);
-        ev.dataTransfer.effectAllowed = "move";
-      };
-      if (curKey && marks[curKey] === p.tag) b.classList.add("sel");
-      b.onclick = () => assign(p.tag);
-      div.appendChild(b);
-      const rn = document.createElement("button");
-      rn.textContent = "改名";
-      rn.className = "nav renamebtn";
-      rn.title = "改真名（不改标签）";
-      rn.onclick = () => renamePlayer(p.tag);
-      div.appendChild(rn);
-    }
-    box.appendChild(div);
+function clusterPrefill(g) {
+  const counts = {};
+  for (const k of g.keys) {
+    if (touched[k]) continue;
+    const it = itemByKey[k];
+    if (it && it.prefill_tag) counts[it.prefill_tag] = (counts[it.prefill_tag] || 0) + 1;
   }
-  // 兜底行：roster team 与当前三行都不匹配的队员（如场次改名后复用旧 roster，
-  // team 还是旧对手名）——不归行会静默消失，归"其他"行保证可选（2026-08-15 终审）
-  const rest = numbered.filter(([p]) => !KNOWN_TEAMS.includes(p.team));
-  if (rest.length) {
-    const div = document.createElement("div");
-    div.className = "teamrow";
-    const lab = document.createElement("span");
-    lab.textContent = "其他（team 口径不符）：";
-    lab.className = "teamlabel";
-    div.appendChild(lab);
-    for (const [p, idx] of rest) {
-      const b = document.createElement("button");
-      b.textContent = (idx < 9 ? (idx + 1) + " " : "") + p.tag +
-        (p.name ? "=" + p.name : "");
-      b.className = teamClass(p.team);
-      b.draggable = true;
-      b.ondragstart = (ev) => {
-        // 自定义 MIME：与簇行拖拽的 text/plain 隔离，防跨域误触发
-        ev.dataTransfer.setData("text/player-tag", p.tag);
-        ev.dataTransfer.effectAllowed = "move";
-      };
-      if (curKey && marks[curKey] === p.tag) b.classList.add("sel");
-      b.onclick = () => assign(p.tag);
-      div.appendChild(b);
-      const rn = document.createElement("button");
-      rn.textContent = "改名";
-      rn.className = "nav renamebtn";
-      rn.title = "改真名（不改标签）";
-      rn.onclick = () => renamePlayer(p.tag);
-      div.appendChild(rn);
-    }
-    box.appendChild(div);
-  }
+  const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) return null;
+  if (entries.length === 1) return entries[0][0];
+  if (entries[0][1] > entries[1][1]) return entries[0][0];
+  return null;
 }
-function groupLabel(g) {
-  // 组标签：簇#gid（N 球，已归属 X[，并自 #a/#b]）；未并过无"并自"段
-  const t = groupTag(g);
-  let s = "簇#" + g.gid + "（" + g.keys.length + " 球，已归属 " + t.assigned;
-  if (g.cids.length > 1) {
-    s += "，并自 " + g.cids.filter(c => c !== g.gid).map(c => "#" + c).join("/");
-  }
-  return s + "）";
+function pendingGroups() {
+  const groups = computeGroups();
+  return groups.filter(g => !clState.done[String(g.gid)]);
 }
-function splitGroup(gid) {
-  // 拆开 = 删 merges 中指向该组的所有条目；不动 marks / 目标组 clAssign；
-  // doomed 必须传给 saveClState 的删除清单，否则读回合并会把删除的键复活
-  const doomed = Object.keys(clState.merges)
-    .filter(k => groupIdOf(parseInt(k, 10)) === gid);
-  for (const k of doomed) delete clState.merges[k];
-  saveClState({ merges: doomed, clAssign: [] });
-  show(cur);
+function clusterQueue() {
+  const pending = pendingGroups();
+  const set = new Set(clusterOrder);
+  const still = clusterOrder.filter(gid => pending.some(g => g.gid === gid));
+  for (const g of pending) { if (!set.has(g.gid)) still.push(g.gid); }
+  return still.map(gid => pending.find(g => g.gid === gid)).filter(Boolean)
+    .sort((a, b) => {
+      const ka = clusterSortKey(a), kb = clusterSortKey(b);
+      if (ka[0] !== kb[0]) return ka[0] - kb[0];
+      return ka[1] - kb[1];
+    });
 }
-function deleteCluster(gid) {
-  // 删簇 = 墓碑隐藏显示组：只移除分组视图，ITEMS/marks/touched/clAssign 一律不动
-  // （簇只是分组预填，组内球在逐球区照常核对）；无页内撤销，找回=清站点数据
-  const g = computeGroups().find(x => x.gid === gid);
-  if (!g) return;
-  if (!confirm("删除簇#" + gid + "？组内 " + g.keys.length +
-               " 球的归属不变，可在第三步逐球核对")) return;
-  clState.deleted[String(gid)] = true;
-  if (pickerGid === gid) pickerGid = null; // 顺手清悬挂弹条状态（组已不渲染）
+function clusterSortKey(g) {
+  const items = groupItems(g);
+  const first = items.length ? items[0].anchor_time : 1e9;
+  return [-g.keys.length, first];
+}
+function currentCluster() {
+  const q = clusterQueue();
+  if (!q.length) return null;
+  curClusterIdx = Math.max(0, Math.min(curClusterIdx, q.length - 1));
+  return q[curClusterIdx];
+}
+function initClusterOrder() {
+  clusterOrder = pendingGroups().map(g => g.gid);
+}
+function setClusterDone(gid) {
+  clState.done[String(gid)] = true;
   saveClState();
-  show(cur);
+}
+function isEAlias() {
+  return !KEYMAP.some(m => m.key === "E");
+}
+function tagOfKey(key) {
+  const m = KEYMAP.find(x => x.key === key);
+  return m ? m.tag : null;
+}
+function assignCurrentObject(tag) {
+  if (mode === "cluster") assignCluster(tag); else assignBall(tag);
+}
+function assignCluster(tag) {
+  const g = currentCluster();
+  if (!g) return;
+  pushUndo("整簇归属");
+  let changed = 0;
+  for (const k of g.keys) {
+    if (touched[k]) continue;
+    if (pool.includes(k)) continue;
+    marks[k] = tag;
+    touched[k] = true;
+    changed++;
+    propagateFrom(k, tag);
+  }
+  // SKIP 球允许未归属，不阻塞簇 done：只要有改动或其余非 SKIP 球均已归属/剔除即置 done
+  if (changed || g.keys.every(k => marks[k] || pool.includes(k) || isSkippedKey(k))) {
+    setClusterDone(g.gid);
+  }
+  save();
+  render();
+}
+function isSkippedKey(k) {
+  const it = itemByKey[k];
+  return it && it.status === "SKIP";
+}
+function clusterAdoptPrefill() {
+  const g = currentCluster();
+  if (!g) return;
+  const tag = clusterPrefill(g);
+  if (!tag) { toast("无可唯一采纳的预填"); return; }
+  assignCluster(tag);
+}
+function clusterNoGoal() {
+  const g = currentCluster();
+  if (!g) return;
+  if (!confirm("将整簇 " + g.keys.length + " 球标为不算进球？")) return;
+  assignCluster(NOGOAL);
+}
+function clusterOpponent() {
+  assignCluster(OPPONENT_TAG);
+}
+function skipCluster() {
+  const q = clusterQueue();
+  if (!q.length) return;
+  const gid = q[curClusterIdx].gid;
+  clusterOrder = clusterOrder.filter(id => id !== gid);
+  clusterOrder.push(gid);
+  render();
+}
+function clusterAcceptAllPrefills() {
+  pushUndo("接受预填");
+  let n = 0, nPhoto = 0, nAmb = 0, nTouched = 0;
+  for (const it of ITEMS) {
+    if (it.prefill_note === "ambiguous") nAmb++;
+    if (!it.prefill_tag) continue;
+    if (touched[it.key]) { nTouched++; continue; }
+    if (marks[it.key] === it.prefill_tag) continue;
+    marks[it.key] = it.prefill_tag;
+    n++;
+    if (it.prefill_note === "photo") nPhoto++;
+  }
+  save();
+  render();
+  alert("已接受 " + n + " 个预填（号码 " + (n - nPhoto) + " / 照片 " + nPhoto +
+        "；歧义 " + nAmb + " / 已手改 " + nTouched + " 跳过）");
+}
+function acceptAllOpponent() {
+  // 一键全收对手预填（opponent-prefill）：仅 team_guess="黑"（黑球衣=对手色系）
+  pushUndo("接受对手预填");
+  let n = 0, nTouched = 0;
+  for (const it of ITEMS) {
+    if (it.status === "SKIP") continue;
+    if (it.team_guess !== "黑") continue;
+    if (marks[it.key]) continue;
+    if (touched[it.key]) { nTouched++; continue; }
+    marks[it.key] = OPPONENT_TAG;
+    n++;
+  }
+  save();
+  render();
+  alert("已接受 " + n + " 个对手预填（已手改 " + nTouched + " 跳过）");
+}
+function startMerge() {
+  const g = currentCluster();
+  if (!g) return;
+  const all = computeGroups().filter(x => x.gid !== g.gid);
+  if (!all.length) { toast("无其他簇可合并"); return; }
+  mergeState = { srcGid: g.gid, targetIdx: 0, targets: all };
+  render();
+}
+function moveMergeTarget(delta) {
+  if (!mergeState) return;
+  mergeState.targetIdx = (mergeState.targetIdx + delta + mergeState.targets.length)
+    % mergeState.targets.length;
+  render();
+}
+function confirmMerge() {
+  if (!mergeState) return;
+  const dst = mergeState.targets[mergeState.targetIdx];
+  const src = mergeState.srcGid;
+  mergeState = null;
+  mergeInto(src, dst.gid);
+}
+function cancelMerge() {
+  mergeState = null;
+  render();
 }
 function mergeInto(srcGid, dstGid) {
-  // 拖拽合并：被并组全部原始簇指向目标组；预填来源 = 目标组 clAssign，
-  // 无则组内非空 marks 全一致的 tag，混合/未归不预填；被并组 clAssign 删除
   srcGid = groupIdOf(srcGid);
   dstGid = groupIdOf(dstGid);
-  if (srcGid === dstGid) return; // 自身/同组无操作
+  if (srcGid === dstGid) return;
   const groups = computeGroups();
   const src = groups.find(g => g.gid === srcGid);
   const dst = groups.find(g => g.gid === dstGid);
   if (!src || !dst) return;
+  pushUndo("合并簇");
   for (const cid of src.cids) clState.merges[String(cid)] = dstGid;
   let tag = clState.clAssign[String(dstGid)];
   if (!tag) {
@@ -607,283 +680,116 @@ function mergeInto(srcGid, dstGid) {
     if (ts.length && ts.every(x => x === ts[0])) tag = ts[0];
   }
   if (tag) {
-    for (const k of src.keys) { if (!touched[k]) marks[k] = tag; }
+    for (const k of src.keys) { if (!touched[k] && !pool.includes(k)) marks[k] = tag; }
   }
   const delAssign = [];
   for (const cid of src.cids) {
     const k = String(cid);
-    delete clState.clAssign[k]; // 本地有无都删：stored 里独有的残留键靠删除清单压住
+    delete clState.clAssign[k];
     delAssign.push(k);
   }
   save();
   saveClState({ merges: [], clAssign: delAssign });
-  show(cur);
-  // PICKER-HOOK 已挂接：未自动预填 → 就地弹选人条（spec 合并动作 7）
-  if (!tag) openPicker(dstGid);
+  initClusterOrder();
+  curClusterIdx = Math.max(0, clusterOrder.indexOf(dstGid));
+  render();
 }
-function pickMerge(gid) {
-  // 点选合并：未选源→记源；点源行→取消；点目标行→并入（先清态再合并，
-  // mergeInto 内部 show 重渲染，避免残态参与渲染）
-  if (mergeSrc === null) { mergeSrc = gid; show(cur); return; }
-  if (mergeSrc === gid) { mergeSrc = null; show(cur); return; }
-  const src = mergeSrc;
-  mergeSrc = null;
-  mergeInto(src, gid);
+function splitGroup(gid) {
+  const doomed = Object.keys(clState.merges)
+    .filter(k => groupIdOf(parseInt(k, 10)) === gid);
+  if (!doomed.length) return;
+  pushUndo("拆开簇");
+  for (const k of doomed) delete clState.merges[k];
+  saveClState({ merges: doomed, clAssign: [] });
+  initClusterOrder();
+  render();
 }
-function openPicker(gid) {
-  pickerGid = gid;
-  show(cur);
-}
-function closePicker() {
-  if (pickerGid === null) return;
-  pickerGid = null;
-  show(cur);
-}
-function isCollapsed(g) {
-  // 优先级：总开关 > 显式 collapsed > 默认规则（组内全部球有 marks → 折叠）
-  if (collapseAll !== null) return collapseAll;
-  const ex = clState.collapsed[String(g.gid)];
-  if (ex !== undefined) return !!ex;
-  return g.keys.every(k => marks[k]);
-}
-function toggleCollapse(gid) {
+function deleteCluster(gid) {
   const g = computeGroups().find(x => x.gid === gid);
   if (!g) return;
-  clState.collapsed[String(gid)] = !isCollapsed(g);
+  if (!confirm("删除簇#" + gid + "？组内 " + g.keys.length +
+               " 球的归属不变，该簇标记为已完成")) return;
+  pushUndo("删除簇");
+  clState.deleted[String(gid)] = true;
+  clState.done[String(gid)] = true;
   saveClState();
-  show(cur);
+  initClusterOrder();
+  render();
 }
-function renderClusters() {
-  // 簇区按显示组渲染：图墙拼接 + 组标签 + 拆开钮（合并组才有）+ 选人按钮；
-  // 无簇数据整区隐藏（无 --clusters 行为同旧版）
-  const box = document.getElementById("clusters");
-  box.innerHTML = "";
-  const step2 = document.getElementById("step2");
-  if (!CLUSTERS.length) {
-    box.style.display = "none";
-    if (step2) step2.style.display = "none";
-    return;
-  }
-  box.style.display = "block";
-  if (step2) step2.style.display = "block";
-  const tbar = document.createElement("div");
-  const tall = document.createElement("button");
-  tall.textContent = "全部展开/折叠";
-  tall.className = "nav";
-  tall.onclick = () => {
-    collapseAll = collapseAll === null ? true : !collapseAll;
-    renderClusters();
-  };
-  tbar.appendChild(tall);
-  box.appendChild(tbar);
-  const groups = computeGroups();
-  // 点选合并残态守卫：源组被并走/被删/被拆开后不在可见组里即清态
-  // （mergeInto/splitGroup/deleteCluster 都经 show→renderClusters，此处一处全覆盖）
-  if (mergeSrc !== null && !groups.some(g => g.gid === mergeSrc)) mergeSrc = null;
-  for (const g of groups) {
-    const row = document.createElement("div");
-    row.className = "cluster-row";
-    row.dataset.gid = g.gid;
-    const folded = isCollapsed(g);
-    if (folded) row.classList.add("collapsed");
-    const fb = document.createElement("button");
-    fb.textContent = folded ? "▸" : "▾";
-    fb.className = "foldbtn nav";
-    fb.title = folded ? "展开" : "折叠";
-    fb.onclick = () => toggleCollapse(g.gid);
-    row.appendChild(fb);
-    row.draggable = true;
-    row.ondragstart = (ev) => {
-      ev.dataTransfer.setData("text/plain", String(g.gid));
-      ev.dataTransfer.effectAllowed = "move";
-    };
-    row.ondragover = (ev) => {
-      // 只响应簇行拖拽（text/plain）；队员拖拽（text/player-tag）不高亮
-      if (!ev.dataTransfer.types.includes("text/plain")) return;
-      ev.preventDefault();
-      row.classList.add("drop-target");
-    };
-    row.ondragleave = () => row.classList.remove("drop-target");
-    row.ondrop = (ev) => {
-      // 同上守卫：队员 tag 拖到簇行不得触发合并
-      if (!ev.dataTransfer.types.includes("text/plain")) return;
-      ev.preventDefault();
-      row.classList.remove("drop-target");
-      const src = parseInt(ev.dataTransfer.getData("text/plain"), 10);
-      if (!isNaN(src)) mergeInto(src, g.gid);
-    };
-    for (const rc of folded ? g.rep_crops.slice(0, 1) : g.rep_crops) {
-      const im = document.createElement("img");
-      im.src = rc;
-      im.className = "rep";
-      im.alt = "簇代表图";
-      row.appendChild(im);
-    }
-    const lab = document.createElement("span");
-    lab.className = "clusterlabel";
-    const gt = groupTag(g);
-    lab.textContent = groupLabel(g) +
-      (gt.tag ? " → " + gt.tag + (gt.mixed ? "（混合）" : "") : "");
-    row.appendChild(lab);
-    if (!folded && g.cids.length > 1) {
-      const sp = document.createElement("button");
-      sp.textContent = "拆开";
-      sp.className = "nav";
-      sp.onclick = () => splitGroup(g.gid);
-      row.appendChild(sp);
-    }
-    if (!folded) {
-      for (const p of PLAYERS) {
-        const b = document.createElement("button");
-        b.textContent = p.tag + (p.name ? "=" + p.name : "");
-        b.className = teamClass(p.team);
-        b.onclick = () => clusterAssign(g.gid, p.tag);
-        row.appendChild(b);
-      }
-    }
-    const del = document.createElement("button");
-    del.textContent = "删除";
-    del.className = "nav";
-    del.title = "移除该簇分组（不动球和归属）";
-    del.onclick = () => deleteCluster(g.gid);
-    row.appendChild(del);
-    const mg = document.createElement("button");
-    mg.textContent = mergeSrc === null ? "合并"
-      : (mergeSrc === g.gid ? "取消" : "并入这里");
-    mg.className = "nav";
-    mg.title = "点选合并：先点源行，再点目标行（拖拽也行）";
-    mg.onclick = () => pickMerge(g.gid);
-    row.appendChild(mg);
-    if (mergeSrc === g.gid) row.classList.add("merge-src");
-    if (pickerGid === g.gid) {
-      const pk = document.createElement("div");
-      pk.className = "picker";
-      const hint = document.createElement("span");
-      hint.className = "hint";
-      hint.textContent = "合并完成，选人应用到整组（" + g.keys.length + " 球）：";
-      pk.appendChild(hint);
-      for (const p of PLAYERS) {
-        const b = document.createElement("button");
-        b.textContent = p.tag + (p.name ? "=" + p.name : "");
-        b.className = teamClass(p.team);
-        b.onclick = () => { pickerGid = null; clusterAssign(g.gid, p.tag); };
-        pk.appendChild(b);
-      }
-      const cancel = document.createElement("button");
-      cancel.textContent = "取消";
-      cancel.className = "nav";
-      cancel.onclick = () => closePicker();
-      pk.appendChild(cancel);
-      row.appendChild(pk);
-    }
-    box.appendChild(row);
-  }
-}
-function clusterAssign(cid, tag) {
-  // 簇级选人 = 按组批量预填：只写未 touched 的 key（逐球覆盖优先）；
-  // 记 clAssign 作合并预填来源（spec：clAssign 唯一用途）
-  const gid = groupIdOf(cid);
-  const g = computeGroups().find(x => x.gid === gid);
+function startEject() {
+  const g = currentCluster();
   if (!g) return;
-  for (const k of g.keys) { if (!touched[k]) marks[k] = tag; }
-  clState.clAssign[String(gid)] = tag;
+  const items = groupItems(g);
+  if (!items.length) return;
+  ejectState = { items, idx: 0 };
+  render();
+}
+function moveEjectTarget(delta) {
+  if (!ejectState) return;
+  ejectState.idx = (ejectState.idx + delta + ejectState.items.length)
+    % ejectState.items.length;
+  render();
+}
+function ejectCurrent() {
+  if (!ejectState) return;
+  const it = ejectState.items[ejectState.idx];
+  if (pool.includes(it.key)) return;
+  pushUndo("剔除球");
+  pool.push(it.key);
+  savePool();
   save();
-  saveClState();
-  show(cur);
+  render();
 }
-function show(i) {
-  let vis = visible();
-  let flash = "";
-  if (!vis.length && review.target !== "") {
-    // 空可见集（改归离集/持久 target 失效）→ 提示并自动切回全部（spec 空态契约；
-    // 不得像旧版 !ITEMS.length 早退那样停在旧画面）
-    flash = review.target === "__none__" ? "未归属清零，已切回全部 | "
-      : "此人核对完毕，已切回全部 | ";
-    review.target = "";
-    saveReview();
-    vis = visible();
-  }
-  if (!vis.length) return; // ITEMS 本身为空（无球）：旧行为不变
-  cur = Math.max(0, Math.min(i, vis.length - 1));
-  const it = vis[cur];
-  const img = document.getElementById("crop");
-  if (it.crop) { img.src = it.crop; img.style.display = "inline-block"; }
-  else { img.removeAttribute("src"); img.style.display = "none"; }
-  const v = document.getElementById("v");
-  if (it.clip) { v.src = it.clip; v.style.display = "inline-block"; v.play().catch(() => {}); }
-  else { v.pause(); v.removeAttribute("src"); v.load(); v.style.display = "none"; }
-  localStorage.setItem(posKey(), String(cur));
-  let info = flash + `第 ${cur + 1}/${vis.length} 个`;
-  if (review.target !== "") {
-    // 进度行带核对对象后缀（有真名则 tag=真名）；全部模式不带
-    const rp = PLAYERS.find(x => x.tag === review.target);
-    info += "（核对：" + (review.target === "__none__" ? "未归属"
-      : review.target + (rp && rp.name ? "=" + rp.name : "")) + "）";
-  }
-  info += ` | 已归属 ${nDone()}/${ITEMS.length} | ${it.file} t=${it.anchor_time}s`;
-  if (it.cluster_id) info += ` | 簇#${groupIdOf(it.cluster_id)}`;
-  // 轨迹号按文件内编号（track_links 契约；无 --track-links 时条目 track_id 全 null 不显示）
-  if (it.track_id !== null && it.track_id !== undefined) info += " | 轨迹#" + it.track_id;
-  // 预填优先级：号码匹配（K3 读号）> 照片库识别 > 印名匹配 > 颜色 team_guess；歧义不预填
-  const ab = document.getElementById("accept");
-  if (it.status === "SKIP") info += " | 无法定位";
-  else if (it.prefill_tag) {
-    info += ` | ${it.prefill_note === "photo" ? "照片预填" : "号码预填"}:${it.prefill_tag}`;
-  }
-  else if (it.prefill_note === "ambiguous") info += " | 号码歧义(同号多人)";
-  else if (it.team_guess === "黑") info += " | 对手预填:黑";
-  else if (it.team_guess) info += ` | 颜色预填:${it.team_guess}`;
-  const ng = it.number_guess;
-  if (ng && ng.number) info += ` (读号:${ng.color || ""}${ng.number})`;
-  // 传播预填徽标（判定式 spec §页面写死）：marks 有值 + 在 propagateAssign + 未手改；
-  // 用户逐球改归即 touched，徽标消失（手改是终裁，高于传播预填）
-  if (marks[it.key] && propagateAssign[it.key] && !touched[it.key]) info += " | 同轨迹预填";
-  if (it.prefill_tag) {
-    ab.textContent = `采用 ${it.prefill_tag} (E)`;
-    ab.style.display = "inline-block";
-    ab.onclick = () => assign(it.prefill_tag);
-  } else {
-    ab.style.display = "none";
-    ab.onclick = null;
-  }
-  // 照片候选角标：与预填不一致（读号/照片冲突、读号歧义或无预填）时显示
-  // 号码+得分，点击改用照片归属——不静默覆盖（spec: docs/photo-roster T5）
-  const pgb = document.getElementById("photoaccept");
-  const pg = it.photo_guess;
-  if (pg && pg.tag !== it.prefill_tag) {
-    info += ` | 照片候选:${pg.number}号(得分${pg.score.toFixed(3)})`;
-    pgb.textContent = `改用照片:${pg.tag}`;
-    pgb.style.display = "inline-block";
-    pgb.onclick = () => assign(pg.tag);
-  } else {
-    pgb.style.display = "none";
-    pgb.onclick = null;
-  }
-  // 标为对手（opponent-filter T2）：一键归属伪球员；已标则变为撤销
-  const ob = document.getElementById("oppmark");
-  if (marks[it.key] === OPP_TAG) {
-    ob.textContent = "撤销对手标记";
-    ob.onclick = () => unassign();
-  } else {
-    // 黑球衣候选球（opponent-prefill）：文案引导接受预填；非候选维持"标为对手"
-    ob.textContent = it.team_guess === "黑" ? "接受对手预填" : "标为对手";
-    ob.onclick = () => assign(OPP_TAG);
-  }
-  document.getElementById("prog").textContent = info;
-  document.getElementById("cur").textContent =
-    marks[it.key] ? "当前归属: " + marks[it.key] : "未归属";
-  renderPlayers();
-  renderClusters();
-  renderReviewBar();
+function cancelEject() {
+  ejectState = null;
+  render();
+}
+function ballQueue() {
+  const pending = pendingGroups();
+  const pendingGids = new Set(pending.map(g => g.gid));
+  return ITEMS.filter(it => {
+    if (ballFilter && ballFilter !== "__none__") return marks[it.key] === ballFilter;
+    if (ballFilter === "__none__") return !marks[it.key];
+    if (marks[it.key]) return false;
+    if (pool.includes(it.key)) return true;
+    if (it.cluster_id == null) return true;
+    const gid = groupIdOf(it.cluster_id);
+    return !pendingGids.has(gid);
+  });
+}
+function currentBall() {
+  const q = ballQueue();
+  if (!q.length) return null;
+  curBallIdx = Math.max(0, Math.min(curBallIdx, q.length - 1));
+  return q[curBallIdx];
+}
+function assignBall(tag) {
+  const q = ballQueue();
+  if (!q.length) return;
+  const it = q[curBallIdx];
+  pushUndo("逐球归属");
+  marks[it.key] = tag;
+  touched[it.key] = true;
+  propagateFrom(it.key, tag);
+  save();
+  render();
+}
+function skipBall() {
+  const q = ballQueue();
+  if (!q.length) return;
+  curBallIdx = (curBallIdx + 1) % q.length;
+  render();
+}
+function assignCurrentPrefill() {
+  if (mode === "cluster") { clusterAdoptPrefill(); return; }
+  const it = currentBall();
+  if (it && it.prefill_tag) assignBall(it.prefill_tag);
+  else toast("当前球无可采纳预填");
 }
 function propagateFrom(srcKey, tag) {
-  // 轨迹传播（spec: docs/scorer-propagate/spec.md §页面写死）：用户逐球归属时，
-  // 同文件同 track_id 且无 marks/无号码预填（prefill_tag）/未 touched 的球自动
-  // 写入 marks 并记 propagateAssign provenance；"不算进球"哨兵绝不传播；
-  // 轨迹不跨文件（file 同判，track_id 只是文件内编号）
   if (tag === NOGOAL) return;
-  const src = ITEMS.find(x => x.key === srcKey);
-  if (!src || src.track_id === null || src.track_id === undefined) return;
+  const src = itemByKey[srcKey];
+  if (!src || src.track_id == null) return;
   for (const it of ITEMS) {
     if (it.key === srcKey) continue;
     if (it.file !== src.file || it.track_id !== src.track_id) continue;
@@ -891,69 +797,6 @@ function propagateFrom(srcKey, tag) {
     marks[it.key] = tag;
     propagateAssign[it.key] = true;
   }
-}
-function assign(tag) {
-  const vis = visible();
-  if (!vis.length) return;
-  marks[vis[cur].key] = tag;
-  touched[vis[cur].key] = true;
-  propagateFrom(vis[cur].key, tag);
-  save();
-  if (review.target !== "") {
-    // 按人/未归属模式：改归后球离集，落原索引位置的新当前项（[i] 即下一个），到尾停末尾
-    show(cur);
-    return;
-  }
-  // 全部模式 = 现状：跳下一个未归属球（全局 findIndex）
-  let nxt = vis.findIndex((x, idx) => idx > cur && !marks[x.key]);
-  if (nxt < 0) nxt = vis.findIndex(x => !marks[x.key]);
-  show(nxt >= 0 ? nxt : cur);
-}
-function skip() {
-  const vis = visible();
-  if (!vis.length) return;
-  let nxt = vis.findIndex((x, idx) => idx > cur && !marks[x.key]);
-  if (nxt < 0) nxt = (cur + 1) % vis.length;
-  show(nxt);
-}
-function freeAssign() {
-  const inp = document.getElementById("free");
-  const tag = inp.value.trim();
-  if (!tag) return;
-  if (tag === "__none__") { inp.value = ""; return; } // 保留特殊值，防撞未归属集语义
-  inp.value = "";
-  assign(tag);
-}
-function jumpUnassigned() {
-  // 跳到未归属 = 切到未归属核对对象（spec 手工清单：两者一致）
-  reviewTarget("__none__");
-}
-function unassign() {
-  // 撤销归属（opponent-filter T2 配套）：删 marks/touched 回未归属，位置不动
-  const vis = visible();
-  if (!vis.length) return;
-  const key = vis[cur].key;
-  delete marks[key];
-  delete touched[key];
-  save();
-  show(cur);
-}
-function acceptAllOpponent() {
-  // 一键全收对手预填（opponent-prefill）：仅 team_guess="黑"（黑球衣=对手色系）
-  // 且未归属、未手改的球写入 marks=OPP_TAG；不标 touched——预填非终裁，
-  // 第三步逐球核对可翻检改回。SKIP 球无裁图无 team_guess，天然不满足条件。
-  let n = 0, nTouched = 0;
-  for (const it of ITEMS) {
-    if (it.team_guess !== "黑") continue;
-    if (touched[it.key]) { nTouched++; continue; }
-    if (marks[it.key] === OPP_TAG) continue; // 幂等：已是对手不重复计数
-    if (marks[it.key]) continue;             // 已归属他队不覆盖（人手标过的不动）
-    marks[it.key] = OPP_TAG;
-    n++;
-  }
-  save();
-  show(cur);
-  alert("已接受 " + n + " 个对手预填（已手改/已归属 " + nTouched + " 跳过）");
 }
 function exportRoster() {
   // assignments 并集 = 已有 roster 归属 + 本页全部标记（键即 candidates 的
@@ -1018,104 +861,406 @@ function exportRoster() {
     a.click();
   });
 }
-function acceptAllPrefills() {
-  // 一键全收预填（号码 read-numbers-batch / 照片 photo-roster）：仅 prefill_tag
-  // 非空（号码唯一命中或照片命中）且未手改（非 touched）的球写入 marks；
-  // 不标 touched——预填非终裁，簇级选人仍可覆盖、第三步逐球核对可翻检。
-  // 歧义球（prefill_tag 为空 + prefill_note="ambiguous"）与 SKIP 球（无预填）
-  // 天然不满足条件。计数按 prefill_note 拆分：note==="photo" 计照片，
-  // 其余（含无 note 旧数据）计号码（review MEDIUM-1）。
-  let n = 0, nPhoto = 0, nAmb = 0, nTouched = 0;
+function setVideo(el, src) {
+  if (src) { el.src = src; el.style.display = "inline-block"; el.play().catch(() => {}); }
+  else { el.pause(); el.removeAttribute("src"); el.load(); el.style.display = "none"; }
+}
+function renderPlayerButtons(containerId, onTag) {
+  const box = document.getElementById(containerId);
+  box.innerHTML = "";
+  for (const m of KEYMAP) {
+    const b = document.createElement("button");
+    b.className = "playerbtn " + teamClass(m.team);
+    b.textContent = m.tag + (m.name ? "=" + m.name : "");
+    const kc = document.createElement("span");
+    kc.className = "keycap";
+    kc.textContent = m.key;
+    b.appendChild(kc);
+    b.onclick = () => onTag(m.tag);
+    box.appendChild(b);
+  }
+}
+function renderBar() {
+  const totalClusters = computeGroups().length;
+  const doneClusters = Object.keys(clState.done).filter(k => !clState.deleted[k]).length;
+  document.getElementById("prog").textContent =
+    "簇 " + doneClusters + "/" + totalClusters + " · 球 " + nDone() + "/" + ITEMS.length;
+  document.getElementById("oppInput").value = OPP;
+  const inSubstate = mergeState !== null || ejectState !== null;
+  for (const id of ["export", "undo", "toggleroster", "modebtn"]) {
+    const b = document.getElementById(id);
+    if (b) { b.disabled = inSubstate; b.style.opacity = inSubstate ? "0.5" : "1"; }
+  }
+  const inp = document.getElementById("oppInput");
+  if (inp) inp.disabled = inSubstate;
+}
+function renderStage() {
+  const el = document.getElementById("stage");
+  if (mode === "cluster") {
+    const g = currentCluster();
+    const suffix = g ? " · 当前簇#" + g.gid + "（" + g.keys.length + " 球）" : " · 无待审簇";
+    el.textContent = "模式一：簇审阅" + suffix;
+  } else {
+    el.textContent = "模式二：逐球收尾";
+  }
+}
+function renderRosterTable() {
+  const box = document.getElementById("rosterTable");
+  if (!rosterExpanded) { box.style.display = "none"; return; }
+  box.style.display = "block";
+  let html = '<table><thead><tr><th>标签</th><th>姓名</th><th>队伍</th></tr></thead><tbody>';
+  const teams = [OPP, HOME, "便服"];
+  for (const p of PLAYERS) {
+    html += '<tr><td>' + escapeHtml(p.tag) + '</td><td>' +
+      '<input type="text" data-tag="' + escapeHtml(p.tag) + '" class="name-input" value="' +
+      escapeHtml(p.name) + '"></td><td>' +
+      '<select data-tag="' + escapeHtml(p.tag) + '" class="team-select">' +
+      teams.map(t => '<option value="' + escapeHtml(t) + '"' +
+        (p.team === t ? " selected" : "") + '>' + escapeHtml(t) + '</option>').join("") +
+      '</select></td></tr>';
+  }
+  html += '</tbody></table>';
+  if (mode === "cluster" && !mergeState && !ejectState) {
+    const g = currentCluster();
+    if (g) {
+      html += '<div style="margin-top:8px;">当前簇#<span id="delGid">' + g.gid +
+        '</span> <button id="delClusterBtn" class="nav">删除簇</button></div>';
+    }
+  }
+  box.innerHTML = html;
+  const delBtn = document.getElementById("delClusterBtn");
+  if (delBtn) delBtn.onclick = () => {
+    const gid = parseInt(document.getElementById("delGid").textContent, 10);
+    if (!isNaN(gid)) deleteCluster(gid);
+  };
+  box.querySelectorAll(".name-input").forEach(inp => {
+    inp.oninput = () => {
+      const tag = inp.dataset.tag;
+      const p = PLAYERS.find(x => x.tag === tag);
+      if (!p) return;
+      p.name = inp.value.trim();
+      nameOvr[tag] = p.name;
+      saveNames();
+      render();
+    };
+    inp.onkeydown = (ev) => {
+      if (ev.key === "Tab") return;
+      ev.stopPropagation();
+    };
+  });
+  box.querySelectorAll(".team-select").forEach(sel => {
+    sel.onchange = () => {
+      const tag = sel.dataset.tag;
+      const p = PLAYERS.find(x => x.tag === tag);
+      if (!p) return;
+      p.team = sel.value;
+      teamOvr[tag] = sel.value;
+      saveTeamOvr();
+      render();
+    };
+    sel.onkeydown = (ev) => ev.stopPropagation();
+  });
+}
+function escapeHtml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+function renderClusterView() {
+  document.getElementById("clusterView").style.display = mode === "cluster" ? "block" : "none";
+  if (mode !== "cluster") return;
+  const g = currentCluster();
+  const meta = document.getElementById("clusterMeta");
+  const crops = document.getElementById("clusterCrops");
+  const video = document.getElementById("clusterVideo");
+  const players = document.getElementById("clusterPlayers");
+  const hint = document.getElementById("clusterHint");
+  const mergeBox = document.getElementById("mergeTargets");
+  if (!g) {
+    meta.textContent = "无待审簇，按 / 可手动切到逐球收尾";
+    crops.innerHTML = "";
+    setVideo(video, "");
+    players.innerHTML = "";
+    hint.innerHTML = "";
+    mergeBox.innerHTML = "";
+    return;
+  }
+  const color = clusterColorGuess(g);
+  meta.textContent = "簇#" + g.gid + " · " + g.keys.length + " 球 · 已归属 " +
+    clusterAssignedCount(g) + " · 颜色:" + (color.color || "无") +
+    " · 号码票:" + clusterNumberVotes(g);
+  if (ejectState && ejectState.items.length) {
+    crops.innerHTML = "";
+    ejectState.items.forEach((it, i) => {
+      const img = document.createElement("img");
+      img.src = it.crop || "";
+      if (i === ejectState.idx) img.classList.add("eject-sel");
+      crops.appendChild(img);
+    });
+    setVideo(video, "");
+    hint.innerHTML = "剔除子态：←/→ 选球，X 踢出进残余池，Esc 退出";
+    players.innerHTML = "";
+    mergeBox.innerHTML = "";
+    return;
+  }
+  crops.innerHTML = "";
+  for (const rc of g.rep_crops.slice(0, 8)) {
+    const img = document.createElement("img");
+    img.src = rc;
+    img.alt = "簇代表图";
+    crops.appendChild(img);
+  }
+  const items = groupItems(g);
+  const clipItem = items.find(it => it.clip) || null;
+  setVideo(video, clipItem ? clipItem.clip : "");
+  const prefill = clusterPrefill(g);
+  hint.innerHTML = "选人键整簇归属；Enter" + (isEAlias() ? "/E" : "") +
+    (prefill ? " 采纳预填" + prefill : "（无唯一预填）") +
+    " · P 接受全场预填 · O 对手 · N 不算 · S 跳过 · M 合并 · X 剔除 · ←/→ 翻簇";
+  if (!mergeState) renderPlayerButtons("clusterPlayers", tag => assignCluster(tag));
+  if (mergeState && mergeState.srcGid === g.gid) {
+    setVideo(video, "");
+    players.innerHTML = "";
+    hint.innerHTML = "合并子态：←/→ 选目标簇，Enter 确认，Esc 取消";
+    mergeBox.innerHTML = "";
+    const lab = document.createElement("div");
+    lab.textContent = "合并：←/→ 选目标簇，Enter 确认，Esc 取消";
+    mergeBox.appendChild(lab);
+    mergeState.targets.forEach((tg, i) => {
+      const div = document.createElement("div");
+      div.className = "merge-target" + (i === mergeState.targetIdx ? " sel" : "");
+      const img = document.createElement("img");
+      img.src = tg.rep_crops[0] || "";
+      div.appendChild(img);
+      const sp = document.createElement("span");
+      sp.textContent = "#" + tg.gid;
+      div.appendChild(sp);
+      div.onclick = () => { mergeState.targetIdx = i; render(); };
+      mergeBox.appendChild(div);
+    });
+  } else {
+    mergeBox.innerHTML = "";
+  }
+}
+function renderBallView() {
+  document.getElementById("ballView").style.display = mode === "ball" ? "block" : "none";
+  if (mode !== "ball") return;
+  const it = currentBall();
+  const info = document.getElementById("ballInfo");
+  const img = document.getElementById("crop");
+  const v = document.getElementById("v");
+  if (!it) {
+    info.textContent = "无残余球可审";
+    img.removeAttribute("src"); img.style.display = "none";
+    setVideo(v, "");
+    document.getElementById("ballPlayers").innerHTML = "";
+    renderBallFilter();
+    return;
+  }
+  if (it.crop) { img.src = it.crop; img.style.display = "inline-block"; }
+  else { img.removeAttribute("src"); img.style.display = "none"; }
+  setVideo(v, it.clip || "");
+  let s = `第 ${curBallIdx + 1}/${ballQueue().length} 个 | ` +
+    `已归属 ${nDone()}/${ITEMS.length} | ${it.file} t=${it.anchor_time}s`;
+  if (it.cluster_id) s += " | 簇#" + groupIdOf(it.cluster_id);
+  if (it.track_id != null) s += " | 轨迹#" + it.track_id;
+  if (it.status === "SKIP") s += " | 无法定位";
+  else if (it.prefill_tag) s += " | 预填:" + it.prefill_tag;
+  else if (it.team_guess) s += " | 颜色:" + it.team_guess;
+  if (marks[it.key] && propagateAssign[it.key] && !touched[it.key]) s += " | 同轨迹预填";
+  info.textContent = s;
+  renderPlayerButtons("ballPlayers", tag => assignBall(tag));
+  renderBallFilter();
+}
+function renderBallFilter() {
+  const box = document.getElementById("ballFilter");
+  box.innerHTML = "";
+  const lab = document.createElement("span");
+  lab.textContent = "过滤：";
+  lab.className = "badge";
+  box.appendChild(lab);
+  const mk = (text, val) => {
+    const b = document.createElement("button");
+    b.textContent = text;
+    b.className = "nav" + (ballFilter === val ? " sel" : "");
+    b.onclick = () => { ballFilter = val; curBallIdx = 0; render(); };
+    box.appendChild(b);
+  };
+  mk("残余全部", "");
+  mk("未归属", "__none__");
+  const seen = [];
   for (const it of ITEMS) {
-    if (it.prefill_note === "ambiguous") nAmb++;
-    if (!it.prefill_tag) continue;
-    if (touched[it.key]) { nTouched++; continue; }
-    if (marks[it.key] === it.prefill_tag) continue; // 幂等：已是该预填不重复计数
-    marks[it.key] = it.prefill_tag;
-    n++;
-    if (it.prefill_note === "photo") nPhoto++;
+    const t = marks[it.key];
+    if (t && !seen.includes(t)) seen.push(t);
   }
-  save();
-  show(cur);
-  alert("已接受 " + n + " 个预填（号码 " + (n - nPhoto) + " / 照片 " + nPhoto +
-        "；歧义 " + nAmb + " / 已手改 " + nTouched + " 跳过）");
+  for (const t of seen) {
+    const p = PLAYERS.find(x => x.tag === t);
+    mk(t + (p && p.name ? "=" + p.name : ""), t);
+  }
 }
-document.getElementById("go").onclick = freeAssign;
-document.getElementById("acceptall").onclick = acceptAllPrefills;
-document.getElementById("acceptopp").onclick = acceptAllOpponent;
-document.getElementById("skip").onclick = skip;
-document.getElementById("nogoal").onclick = () => assign(NOGOAL);
-document.getElementById("prev").onclick = () => show(cur - 1);
-document.getElementById("next").onclick = () => show(cur + 1);
-document.getElementById("toun").onclick = jumpUnassigned;
+function toggleRoster() {
+  rosterExpanded = !rosterExpanded;
+  render();
+}
+function toggleMode() {
+  if (mode === "cluster") {
+    mode = "ball";
+    curBallIdx = 0;
+  } else {
+    const pending = pendingGroups();
+    if (!pending.length) { toast("无待审簇，已在逐球模式"); return; }
+    mode = "cluster";
+  }
+  render();
+}
+function autoModeSwitch() {
+  if (mode === "cluster" && !pendingGroups().length) {
+    mode = "ball";
+    curBallIdx = 0;
+    toast("簇队列已清空，自动切换逐球收尾");
+  }
+}
+function render() {
+  autoModeSwitch();
+  renderBar();
+  renderStage();
+  renderRosterTable();
+  renderClusterView();
+  renderBallView();
+  updateKeyHint();
+}
+function updateKeyHint() {
+  const el = document.getElementById("keyhint");
+  if (mergeState) { el.textContent = "合并子态：←/→ 选目标，Enter 确认，Esc 取消"; return; }
+  if (ejectState) { el.textContent = "剔除子态：←/→ 选球，X 踢出，Esc 退出"; return; }
+  let hint = "数字/字母=选人 · Enter" + (isEAlias() ? "/E" : "") + " 采纳预填";
+  hint += " · P 接受全场预填 · O 对手 · N 不算 · S 跳过 · M 合并";
+  hint += " · X 剔除 · Z 撤销 · G 名单 · / 切模式";
+  el.textContent = hint;
+}
+function toast(msg) {
+  const el = document.getElementById("toast");
+  el.textContent = msg;
+  el.style.display = "block";
+  setTimeout(() => { el.style.display = "none"; }, 2500);
+}
+function isInputFocused() {
+  const el = document.activeElement;
+  if (!el) return false;
+  return el.tagName === "INPUT" || el.tagName === "TEXTAREA" ||
+    el.tagName === "SELECT" || el.isContentEditable;
+}
+function nextCluster() {
+  const q = clusterQueue();
+  if (!q.length) return;
+  curClusterIdx = (curClusterIdx + 1) % q.length;
+  render();
+}
+function prevCluster() {
+  const q = clusterQueue();
+  if (!q.length) return;
+  curClusterIdx = (curClusterIdx - 1 + q.length) % q.length;
+  render();
+}
+function nextBall() {
+  const q = ballQueue();
+  if (!q.length) return;
+  curBallIdx = (curBallIdx + 1) % q.length;
+  render();
+}
+function prevBall() {
+  const q = ballQueue();
+  if (!q.length) return;
+  curBallIdx = (curBallIdx - 1 + q.length) % q.length;
+  render();
+}
+
 document.getElementById("export").onclick = exportRoster;
+document.getElementById("undo").onclick = undo;
+document.getElementById("toggleroster").onclick = toggleRoster;
+document.getElementById("modebtn").onclick = toggleMode;
+document.getElementById("oppInput").onchange = (ev) => {
+  pushUndo("改对手队名");
+  oppNameOvr = ev.target.value.trim();
+  OPP = oppNameOvr || OPP;
+  saveOppName();
+  render();
+};
+document.getElementById("oppInput").onkeydown = (ev) => ev.stopPropagation();
+
 document.addEventListener("keydown", (ev) => {
-  const k = ev.key.toLowerCase();
-  if (pickerGid !== null) {
-    // 弹条期间：Esc 关闭；数字键 1-9/E 屏蔽（防误触逐球归属改错球）
-    if (ev.key === "Escape") { closePicker(); return; } // 弹条优先：一次 Esc 只关弹条
-    if ((k >= "1" && k <= "9") || k === "e" || k === "n") return;
-  }
-  if (ev.key === "Escape" && pickerGid === null && mergeSrc !== null) {
-    // 点选合并 Esc 取消（弹条开着时 Esc 优先只关弹条，再按一次才清点选态——
-    // 避免一次按键双清两态；不屏蔽数字键/E，点选态不影响逐球归属）
-    mergeSrc = null;
-    show(cur);
+  if (isInputFocused()) return;
+  const k = ev.key;
+  if (mergeState) {
+    if (k === "Escape") { cancelMerge(); return; }
+    if (k === "ArrowLeft") { moveMergeTarget(-1); return; }
+    if (k === "ArrowRight") { moveMergeTarget(1); return; }
+    if (k === "Enter") { confirmMerge(); return; }
     return;
   }
-  if (ev.target && ev.target.id === "free") {
-    // 弹条打开时 Enter 也不许绕过屏蔽做逐球归属（free 聚焦态可拖拽合并）
-    if (ev.key === "Enter" && pickerGid === null) freeAssign();
+  if (ejectState) {
+    if (k === "Escape") { cancelEject(); return; }
+    if (k === "ArrowLeft") { moveEjectTarget(-1); return; }
+    if (k === "ArrowRight") { moveEjectTarget(1); return; }
+    if (k.toLowerCase() === "x") { ejectCurrent(); return; }
     return;
   }
-  if (k >= "1" && k <= "9") {
-    const idx = parseInt(k, 10) - 1;
-    if (idx < PLAYERS.length) assign(PLAYERS[idx].tag);
-  } else if (k === "s") skip();
-  else if (k === "n") assign(NOGOAL);
-  else if (k === "e") {
-    const vis = visible();
-    if (vis.length && cur < vis.length && vis[cur].prefill_tag) assign(vis[cur].prefill_tag);
+  if (k === "Enter") { assignCurrentPrefill(); return; }
+  if (k.toLowerCase() === "e") {
+    if (isEAlias()) assignCurrentPrefill(); else {
+      const tag = tagOfKey("E"); if (tag) assignCurrentObject(tag);
+    }
+    return;
   }
-  else if (ev.key === "ArrowLeft") show(cur - 1);
-  else if (ev.key === "ArrowRight") show(cur + 1);
+  if (k.toLowerCase() === "p") { clusterAcceptAllPrefills(); return; }
+  if (k.toLowerCase() === "o") { assignCurrentObject(OPPONENT_TAG); return; }
+  if (k.toLowerCase() === "n") {
+    if (mode === "cluster") clusterNoGoal(); else assignBall(NOGOAL);
+    return;
+  }
+  if (k.toLowerCase() === "s") { if (mode === "cluster") skipCluster(); else skipBall(); return; }
+  if (k.toLowerCase() === "m") { if (mode === "cluster") startMerge(); return; }
+  if (k.toLowerCase() === "x") { if (mode === "cluster") startEject(); return; }
+  if (k.toLowerCase() === "z") { undo(); return; }
+  if (k.toLowerCase() === "g") { toggleRoster(); return; }
+  if (k === "/") { toggleMode(); return; }
+  if (k === "ArrowLeft") { if (mode === "cluster") prevCluster(); else prevBall(); return; }
+  if (k === "ArrowRight") { if (mode === "cluster") nextCluster(); else nextBall(); return; }
+  const pk = k.length === 1 ? k.toUpperCase() : "";
+  if (pk && PLAYER_KEYS.includes(pk)) {
+    const tag = tagOfKey(pk);
+    if (tag) assignCurrentObject(tag);
+    return;
+  }
 });
-document.addEventListener("click", (ev) => {
-  if (pickerGid === null) return;
-  if (ev.target && ev.target.closest && ev.target.closest(".picker")) return;
-  closePicker();
-});
-// 启动：恢复核对对象（其集无球时 show 空态分支自动回退全部）→ 读该对象的位置键；
-// 无记录则：全部/未归属=第一个未归属球，按人=第一个球
-const vis0 = visible();
-let start = parseInt(localStorage.getItem(posKey()) || "-1", 10);
-if (isNaN(start) || start < 0 || start >= vis0.length) {
-  start = (review.target !== "" && review.target !== "__none__")
-    ? 0 : vis0.findIndex(it => !marks[it.key]);
+
+loadStorage();
+initClusterOrder();
+if (!CLUSTERS.length || !pendingGroups().length) {
+  mode = "ball";
 }
-show(start >= 0 ? start : 0);
+render();
 </script>
 </body>
 </html>
 """
 
 
-def team_of_tag(tag: str, opp: str, home: str) -> str:
+def team_of_tag(tag: str, opp: str, home: str = TEAM_HOME_DEFAULT) -> str:
     """按标签前缀推定队别：黑*/蓝*→对手队（opp）、白*→主队（home），其余归便服。
 
-    页面导出自动补录名单外标签时用同一规则（JS teamOfTag 与本文档同步，
-    改规则须两端一起改）。蓝色27 归对手系 2026-08-09 用户口径。
+    对手伪球员 ``tag=="对手"`` 单独返回对手队名（docs/opponent-filter/spec.md），
+    不走前缀兜底便服。页面导出自动补录名单外标签时用同一规则
+    （JS teamOfTag 与本文档同步，改规则须两端一起改）。
 
     Args:
-        tag: 球员标签，如 ``黑21`` / ``白-李四`` / ``灰T恤-A``。
+        tag: 球员标签，如 ``黑21`` / ``白-李四`` / ``灰T恤-A`` / ``对手``。
         opp: 对手队名（opponent_of 产物）。
-        home: 主队名（team_config 注入）。
+        home: 主队名（team_config 注入，缺省 DEFAULT_TEAM_NAME）。
 
     Returns:
         opp / home / "便服"。
     """
     if tag == OPPONENT_TAG:
-        # 伪球员"对手"固定对手队（opponent-filter T2，特判先于前缀推队，防落便服）
         return opp
     for prefix, side in _TEAM_PREFIXES:
         if tag.startswith(prefix):
@@ -1123,7 +1268,7 @@ def team_of_tag(tag: str, opp: str, home: str) -> str:
     return TEAM_CASUAL
 
 
-def parse_players(spec: str, opp: str, home: str) -> list[Player]:
+def parse_players(spec: str, opp: str, home: str = TEAM_HOME_DEFAULT) -> list[Player]:
     """解析 --players 名单串："黑21=张三,白-李四=李四" → Player 列表。
 
     每条为 ``tag[=name]``（name 可省，省则为空串）；队别按 team_of_tag 推定。
@@ -1131,7 +1276,7 @@ def parse_players(spec: str, opp: str, home: str) -> list[Player]:
     Args:
         spec: 逗号分隔的名单串；空串返回空列表。
         opp: 对手队名（opponent_of 产物，传给 team_of_tag）。
-        home: 主队名（team_config 注入，传给 team_of_tag）。
+        home: 主队名（team_config 注入，缺省 DEFAULT_TEAM_NAME）。
 
     Returns:
         Player 列表（保持给定顺序）。
@@ -1280,7 +1425,7 @@ def match_players_by_number(
 
 
 def _edit_distance_le1(a: str, b: str) -> bool:
-    """两字符串是否相等或只差 1 个字符（增/删/改）——K3 印名误读容差（张二≈张三）。"""
+    """两字符串是否相等或只差 1 个字符（增/删/改）——K3 印名误读容差（张三≈张二）。"""
     if a == b:
         return True
     if abs(len(a) - len(b)) > 1:
@@ -1330,13 +1475,15 @@ class PhotoGuess:
 
     number: str  # 去零号码（照片库匹配主键口径）
     score: float  # top-1 余弦得分（冲突角标展示用）
-    tag: str  # 名单球员 tag 或占位 tag（主队名<号码>）
+    tag: str  # 名单球员 tag 或占位 tag（<主队名><号码>）
 
 
 def resolve_photo_guesses(
-    matches: dict[str, MatchEntry], players: list[Player], home: str
+    matches: dict[str, MatchEntry],
+    players: list[Player],
+    home: str = TEAM_HOME_DEFAULT,
 ) -> tuple[dict[str, PhotoGuess], list[Player]]:
-    """照片命中号码 → 名单 tag；名单缺号 → 占位 Player（主队名<号>，team=主队名）。
+    """照片命中号码 → 名单 tag；名单缺号 → 占位 Player（<主队名><号>，team=home）。
 
     号码查名单复用 match_players_by_number 的数字边界口径（颜色传 None：照片
     识别不给颜色提示）。同号多人 → WARNING 跳过该球不预填（交人裁判，与读号
@@ -1346,7 +1493,7 @@ def resolve_photo_guesses(
     Args:
         matches: photo_match_scorers.validate_matches_payload 校验产物（key → 命中）。
         players: 本页球员名单（--players/--players-file/已有 roster 合并后）。
-        home: 主队名（team_config 注入；占位 tag 与 team 用它）。
+        home: 主队名（team_config 注入，缺省 DEFAULT_TEAM_NAME）。
 
     Returns:
         (key → PhotoGuess, 需追加注入名单的占位 Player 列表)；同号码多球只占位一份。
@@ -1799,7 +1946,7 @@ def build_html(
     existing_assignments: dict[str, str],
     existing_players: dict[str, Player],
     opp: str,
-    home: str,
+    home: str = TEAM_HOME_DEFAULT,
     clusters: list[dict[str, Any]] | None = None,
 ) -> str:
     """把条目/名单/已有归属/簇数据渲染为自包含确认页 HTML。
@@ -1811,7 +1958,7 @@ def build_html(
         existing_assignments: 已有 roster 的 assignments（页面预填底色）。
         existing_players: 已有 roster 的 tag → Player（自动补录时沿用 name/team）。
         opp: 对手队名（注入 JS ``const OPP``，opponent_of 产物）。
-        home: 主队名（注入 JS ``const HOME``，team_config 产物）。
+        home: 主队名（注入 JS ``const HOME``，team_config 产物；缺省 DEFAULT_TEAM_NAME）。
         clusters: build_page_clusters 产出的簇区数据；None/空列表不渲染簇区
             （无 --clusters 时页面行为与旧版一致）。
 
@@ -1831,9 +1978,13 @@ def build_html(
         {tag: {"name": p.name, "team": p.team} for tag, p in existing_players.items()},
         ensure_ascii=False,
     )
+    keymap_json = json.dumps(build_keymap(page_players), ensure_ascii=False)
+    player_keys_json = json.dumps(list(PLAYER_KEYS), ensure_ascii=False)
     return (
         _HTML.replace("__ITEMS__", json.dumps(entries, ensure_ascii=False))
         .replace("__PLAYERS__", players_json)
+        .replace("__KEYMAP__", keymap_json)
+        .replace("__PLAYER_KEYS__", player_keys_json)
         .replace("__EXISTING__", json.dumps(existing_assignments, ensure_ascii=False))
         .replace("__EXPLAYERS__", explayers_json)
         .replace("__CLUSTERS__", json.dumps(clusters or [], ensure_ascii=False))

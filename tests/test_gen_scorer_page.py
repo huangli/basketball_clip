@@ -29,26 +29,31 @@ import pytest
 
 from errors import BasketballPipelineError, SchemaError
 from gen_scorer_page import (
+    OPPONENT_TAG,
+    PLAYER_KEYS,
     PhotoGuess,
     _validate_clusters,
     _validate_track_links,
     build_cluster_map,
     build_entries,
     build_html,
+    build_keymap,
     build_page_clusters,
     build_track_map,
+    cluster_sort_key,
     load_players_file,
     main,
     match_clip,
     match_players_by_name,
     match_players_by_number,
     merge_assignments,
+    opponent_of,
     parse_players,
     resolve_photo_guesses,
     team_of_tag,
 )
 from photo_match_scorers import MATCH_VERSION, MatchEntry
-from roster import Player, format_key, opponent_of
+from roster import Player, format_key
 
 
 def _goal(file: str = "a.mp4", anchor: float = 4.1) -> dict:
@@ -99,10 +104,10 @@ def _event(src_file: str = "a.mp4", anchor_t0: float = 4.0, clip: str = "clips/a
 
 
 class TestOpponentOf:
-    """对手队名派生：场次 ID 后缀；无后缀/空白后缀回退对手（老场次历史口径）。"""
+    """对手队名派生：场次 ID 后缀；无后缀/空白后缀回退 team_config.DEFAULT_OPPONENT。"""
 
     def test_suffix(self) -> None:
-        assert opponent_of("20260805_对手队") == "对手队"
+        assert opponent_of("20260805_车百鼎") == "车百鼎"
 
     def test_no_suffix_fallback(self) -> None:
         assert opponent_of("20260722") == "对手"
@@ -116,18 +121,77 @@ class TestTeamOfTag:
 
     def test_prefix_teams(self) -> None:
         # Arrange / Act / Assert
-        assert team_of_tag("黑21", "对手", "主队") == "对手"
-        assert team_of_tag("白-测试员乙", "对手", "主队") == "主队"
-        assert team_of_tag("灰T恤-A", "对手", "主队") == "便服"
+        assert team_of_tag("黑21", "地平线") == "地平线"
+        assert team_of_tag("白-熊志鹏", "地平线") == "半截篮"
+        assert team_of_tag("灰T恤-A", "地平线") == "便服"
 
     def test_blue_prefix_maps_to_opponent_team(self) -> None:
-        # Arrange / Act / Assert：蓝 → 对手队（蓝27 归对手系 2026-08-09 用户口径）
-        assert team_of_tag("蓝27", "对手", "主队") == "对手"
+        # Arrange / Act / Assert：蓝 → 对手队（蓝27 归对手系 2026-08-09 立哥口径）
+        assert team_of_tag("蓝27", "地平线") == "地平线"
 
     def test_opponent_name_follows_opp_arg(self) -> None:
         # Arrange / Act / Assert：对手队名随 opp 走，不硬编码（2026-08-15 队名会话化）
-        assert team_of_tag("黑21", "对手队", "主队") == "对手队"
-        assert team_of_tag("蓝27", "对手队", "主队") == "对手队"
+        assert team_of_tag("黑21", "车百鼎") == "车百鼎"
+        assert team_of_tag("蓝27", "车百鼎") == "车百鼎"
+
+    def test_opponent_pseudo_player_maps_to_opp_team(self) -> None:
+        # Arrange / Act / Assert：对手伪球员不走前缀兜底便服
+        assert team_of_tag(OPPONENT_TAG, "车百鼎") == "车百鼎"
+
+
+class TestKeymap:
+    """选人键位映射：27 键、无冲突、超出无键、E 别名边界。"""
+
+    def test_player_keys_count_and_function_disjoint(self) -> None:
+        # Arrange / Act / Assert
+        assert len(PLAYER_KEYS) == 27
+        assert not (set(PLAYER_KEYS) & {"O", "P", "S", "N", "M", "X", "Z", "G", "/"})
+
+    def test_build_keymap_first_27_get_keys(self) -> None:
+        # Arrange
+        players = [Player(tag=f"P{i}", name="", team="半截篮") for i in range(30)]
+        # Act
+        km = build_keymap(players)
+        # Assert
+        assert [m["key"] for m in km[:27]] == list(PLAYER_KEYS)
+        assert all(m["key"] == "" for m in km[27:])
+        assert km[0]["tag"] == "P0"
+
+    def test_build_keymap_e_alias_when_le_11(self) -> None:
+        # Arrange / Act
+        km = build_keymap([Player(tag="黑21", name="", team="地平线")])
+        # Assert：≤11 人时 E 不在 keymap，页面作 Enter 别名
+        assert "E" not in [m["key"] for m in km]
+
+    def test_build_keymap_e_becomes_player_12(self) -> None:
+        # Arrange / Act
+        players = [Player(tag=f"P{i}", name="", team="半截篮") for i in range(12)]
+        km = build_keymap(players)
+        # Assert：第 12 个球员（0-based 11）分配 E
+        assert km[11]["key"] == "E"
+
+
+class TestClusterSortKey:
+    """簇队列排序：球数降序，同数按首球锚点时间升序。"""
+
+    def test_sort_by_size_then_anchor(self) -> None:
+        # Arrange
+        by_key = {
+            "a.mp4#1.0": {"anchor_time": 10.0},
+            "a.mp4#2.0": {"anchor_time": 20.0},
+            "a.mp4#3.0": {"anchor_time": 5.0},
+            "a.mp4#4.0": {"anchor_time": 1.0},
+        }
+        # Act
+        groups = [
+            ["a.mp4#3.0"],  # 1 球，首球 5
+            ["a.mp4#1.0", "a.mp4#2.0"],  # 2 球，首球 10
+            ["a.mp4#4.0"],  # 1 球，首球 1
+        ]
+        groups.sort(key=lambda ks: cluster_sort_key(ks, by_key))
+        # Assert
+        assert [len(g) for g in groups] == [2, 1, 1]
+        assert groups[1] == ["a.mp4#4.0"]
 
 
 class TestParsePlayers:
@@ -135,28 +199,28 @@ class TestParsePlayers:
 
     def test_tag_name_pairs(self) -> None:
         # Arrange / Act
-        players = parse_players("黑21=测试员甲,白-测试员乙=测试员乙,白-小陈=小陈", "对手", "主队")
+        players = parse_players("黑21=大斌,白-熊志鹏=熊志鹏,白-小陈=小陈", "地平线")
         # Assert
         assert players == [
-            Player(tag="黑21", name="测试员甲", team="对手"),
-            Player(tag="白-测试员乙", name="测试员乙", team="主队"),
-            Player(tag="白-小陈", name="小陈", team="主队"),
+            Player(tag="黑21", name="大斌", team="地平线"),
+            Player(tag="白-熊志鹏", name="熊志鹏", team="半截篮"),
+            Player(tag="白-小陈", name="小陈", team="半截篮"),
         ]
 
     def test_name_optional_and_empty_spec(self) -> None:
         # Arrange / Act / Assert
-        assert parse_players("", "对手", "主队") == []
-        assert parse_players("黑21", "对手", "主队") == [Player(tag="黑21", name="", team="对手")]
+        assert parse_players("", "地平线") == []
+        assert parse_players("黑21", "地平线") == [Player(tag="黑21", name="", team="地平线")]
 
     def test_opp_arg_flows_to_team(self) -> None:
         # Arrange / Act / Assert：黑/蓝前缀队名 = opp 参数（队名会话化）
-        players = parse_players("黑21,蓝27", "对手队", "主队")
-        assert [p.team for p in players] == ["对手队", "对手队"]
+        players = parse_players("黑21,蓝27", "车百鼎")
+        assert [p.team for p in players] == ["车百鼎", "车百鼎"]
 
     def test_missing_tag_raises(self) -> None:
         # Arrange / Act / Assert
         with pytest.raises(SchemaError, match="tag"):
-            parse_players("=测试员甲", "对手", "主队")
+            parse_players("=大斌", "地平线")
 
 
 # ---- --players-file 名单文件注入（docs/scorer-reid/spec.md Phase D） ----
@@ -177,8 +241,8 @@ class TestLoadPlayersFile:
         path = _write_players_file(
             tmp_path,
             [
-                {"tag": "白22-小朱", "name": "小朱", "team": "主队"},
-                {"tag": "黑21-测试员甲", "name": "测试员甲", "team": "对手"},
+                {"tag": "白22-小朱", "name": "小朱", "team": "半截篮"},
+                {"tag": "黑21-大斌", "name": "大斌", "team": "地平线"},
                 {"tag": "灰T恤-A", "name": "", "team": "便服"},
             ],
         )
@@ -186,8 +250,8 @@ class TestLoadPlayersFile:
         players = load_players_file(path)
         # Assert
         assert players == [
-            Player(tag="白22-小朱", name="小朱", team="主队"),
-            Player(tag="黑21-测试员甲", name="测试员甲", team="对手"),
+            Player(tag="白22-小朱", name="小朱", team="半截篮"),
+            Player(tag="黑21-大斌", name="大斌", team="地平线"),
             Player(tag="灰T恤-A", name="", team="便服"),
         ]
 
@@ -218,8 +282,8 @@ class TestLoadPlayersFile:
         path = _write_players_file(
             tmp_path,
             [
-                {"tag": "白22-小朱", "name": "小朱", "team": "主队"},
-                {"tag": "白22-小朱", "name": "朱", "team": "主队"},
+                {"tag": "白22-小朱", "name": "小朱", "team": "半截篮"},
+                {"tag": "白22-小朱", "name": "朱", "team": "半截篮"},
             ],
         )
         # Act / Assert
@@ -228,7 +292,9 @@ class TestLoadPlayersFile:
 
     def test_number_prefill_with_file_players(self, tmp_path: pathlib.Path) -> None:
         # Arrange：文件名单注入后走号码预填链路（match_players_by_number 命中）
-        path = _write_players_file(tmp_path, [{"tag": "白22-小朱", "name": "小朱", "team": "主队"}])
+        path = _write_players_file(
+            tmp_path, [{"tag": "白22-小朱", "name": "小朱", "team": "半截篮"}]
+        )
         players = load_players_file(path)
         cand = _candidate()
         cand["number_guess"] = {
@@ -276,7 +342,7 @@ class TestPlayersFileCli:
                     "--goals",
                     str(goals),
                     "--players",
-                    "黑21=测试员甲",
+                    "黑21=大斌",
                     "--players-file",
                     str(players_file),
                 ]
@@ -286,7 +352,7 @@ class TestPlayersFileCli:
         # Arrange
         scorers, goals = self._write_inputs(tmp_path)
         players_file = _write_players_file(
-            tmp_path, [{"tag": "白22-小朱", "name": "小朱", "team": "主队"}]
+            tmp_path, [{"tag": "白22-小朱", "name": "小朱", "team": "半截篮"}]
         )
         # Act
         rc = main(
@@ -303,7 +369,7 @@ class TestPlayersFileCli:
         assert rc == 0
         html = (scorers.parent / "scorer.html").read_text(encoding="utf-8")
         assert '"tag": "白22-小朱"' in html
-        assert '"team": "主队"' in html
+        assert '"team": "半截篮"' in html
 
     def test_bad_players_file_exit_1(self, tmp_path: pathlib.Path) -> None:
         # Arrange：名单文件 schema 损坏（team 空串）
@@ -400,9 +466,9 @@ class TestMatchPlayersByNumber:
     def _players() -> list[Player]:
         """本场名单（含两个黑21，供歧义分支）。"""
         return [
-            Player(tag="黑21-测试员甲", name="测试员甲", team="对手"),
-            Player(tag="黑21-王敏龙", name="王敏龙", team="对手"),
-            Player(tag="白-测试员乙", name="测试员乙", team="主队"),
+            Player(tag="黑21-大斌", name="大斌", team="地平线"),
+            Player(tag="黑21-王敏龙", name="王敏龙", team="地平线"),
+            Player(tag="白-熊志鹏", name="熊志鹏", team="半截篮"),
             Player(tag="蓝色27", name="", team="便服"),
             Player(tag="赛文21", name="", team="便服"),
         ]
@@ -411,7 +477,7 @@ class TestMatchPlayersByNumber:
         # Arrange / Act
         got = match_players_by_number(self._players(), "21", "黑")
         # Assert：三个 21 中颜色滤掉赛文21，剩两个黑21（调用方判歧义）
-        assert [p.tag for p in got] == ["黑21-测试员甲", "黑21-王敏龙"]
+        assert [p.tag for p in got] == ["黑21-大斌", "黑21-王敏龙"]
 
     def test_unique_number_ignores_color_misread(self) -> None:
         # Arrange / Act / Assert：27 唯一，颜色误读为黑也命中蓝色27
@@ -425,7 +491,7 @@ class TestMatchPlayersByNumber:
         # Arrange：三个 21 用白色过滤为空 → 回退歧义全集（不放过潜在误杀）
         # Act / Assert
         got = match_players_by_number(self._players(), "21", "白")
-        assert [p.tag for p in got] == ["黑21-测试员甲", "黑21-王敏龙", "赛文21"]
+        assert [p.tag for p in got] == ["黑21-大斌", "黑21-王敏龙", "赛文21"]
 
     def test_digit_boundary_no_substring(self) -> None:
         # Arrange / Act / Assert：号码 "2" 不误中 "黑21"
@@ -446,22 +512,18 @@ class TestMatchPlayersByName:
 
     def _players(self) -> list:
         return [
-            Player(tag="黑21-测试员甲", name="测试员甲", team="对手"),
-            Player(tag="黑21-王敏龙", name="王敏龙", team="对手"),
+            Player(tag="黑21-大斌", name="大斌", team="地平线"),
+            Player(tag="黑21-王敏龙", name="王敏龙", team="地平线"),
             Player(tag="蓝色27", name="", team="便服"),
         ]
 
     def test_exact_name_match(self) -> None:
         # Arrange / Act / Assert
-        assert [p.tag for p in match_players_by_name(self._players(), "测试员甲")] == [
-            "黑21-测试员甲"
-        ]
+        assert [p.tag for p in match_players_by_name(self._players(), "大斌")] == ["黑21-大斌"]
 
     def test_one_char_misread_match(self) -> None:
-        # Arrange / Act / Assert：K3 把"测试员甲"读成"测试员戊"（差 1 字符）仍命中
-        assert [p.tag for p in match_players_by_name(self._players(), "测试员戊")] == [
-            "黑21-测试员甲"
-        ]
+        # Arrange / Act / Assert：K3 把"大斌"读成"大秋"（差 1 字符）仍命中
+        assert [p.tag for p in match_players_by_name(self._players(), "大秋")] == ["黑21-大斌"]
 
     def test_no_match_and_empty(self) -> None:
         # Arrange / Act / Assert：无关文本与空值不中
@@ -486,20 +548,20 @@ class TestNumberPrefill:
 
     def test_unique_number_match_prefills(self) -> None:
         # Arrange：名单只有一个 黑21
-        players = [Player(tag="黑21-测试员甲", name="测试员甲", team="对手")]
+        players = [Player(tag="黑21-大斌", name="大斌", team="地平线")]
         # Act
         entries = build_entries(
             [_goal()], [self._candidate_with_number("21", "黑")], None, "", "", players
         )
         # Assert：号码预填压过颜色 team_guess（候选 team_guess=黑）
-        assert entries[0]["prefill_tag"] == "黑21-测试员甲"
+        assert entries[0]["prefill_tag"] == "黑21-大斌"
         assert entries[0]["prefill_note"] == ""
 
     def test_ambiguous_same_number_no_prefill(self) -> None:
         # Arrange：两个黑21 → 歧义
         players = [
-            Player(tag="黑21-测试员甲", name="测试员甲", team="对手"),
-            Player(tag="黑21-王敏龙", name="王敏龙", team="对手"),
+            Player(tag="黑21-大斌", name="大斌", team="地平线"),
+            Player(tag="黑21-王敏龙", name="王敏龙", team="地平线"),
         ]
         # Act
         entries = build_entries(
@@ -511,7 +573,7 @@ class TestNumberPrefill:
 
     def test_no_number_no_prefill(self) -> None:
         # Arrange：K3 没读出号码
-        players = [Player(tag="黑21-测试员甲", name="测试员甲", team="对手")]
+        players = [Player(tag="黑21-大斌", name="大斌", team="地平线")]
         # Act
         entries = build_entries(
             [_goal()], [self._candidate_with_number(None, "黑")], None, "", "", players
@@ -599,9 +661,9 @@ class TestBuildHtml:
     def test_inlines_items_players_session(self) -> None:
         # Arrange
         entries = build_entries([_goal()], [_candidate()], None, "", "")
-        players = [Player(tag="黑21", name="测试员甲", team="对手")]
+        players = [Player(tag="黑21", name="大斌", team="地平线")]
         # Act
-        html = build_html(entries, players, "20260722", {}, {}, "对手", "主队")
+        html = build_html(entries, players, "20260722", {}, {}, "地平线")
         # Assert
         assert '"key": "a.mp4#4.1"' in html
         assert '"tag": "黑21"' in html
@@ -609,14 +671,14 @@ class TestBuildHtml:
 
     def test_progress_localstorage_key_contains_session(self) -> None:
         # Arrange / Act
-        html = build_html([], [], "mysession", {}, {}, "对手", "主队")
+        html = build_html([], [], "mysession", {}, {}, "地平线")
         # Assert
         assert '"scorer_" + SESSION' in html
         assert "localStorage" in html
 
     def test_export_contract_roster_json(self) -> None:
         # Arrange / Act
-        html = build_html([], [], "20260722", {}, {}, "对手", "主队")
+        html = build_html([], [], "20260722", {}, {}, "地平线")
         # Assert：导出结构字段与文件名契约（roster.py validate_roster 可过；
         # roster-export-name：下载名即 roster.json，移到 work/<场次>/ 直接接入 CLI）
         assert 'a.download = "roster.json";' in html
@@ -626,37 +688,35 @@ class TestBuildHtml:
         # confirmed 条件：全部非 SKIP 球已归属
         assert 'it.status === "SKIP" || marks[it.key]' in html
 
-    def test_skip_badge_and_free_text_and_keys(self) -> None:
+    def test_new_ui_mode_and_keys(self) -> None:
         # Arrange / Act
-        html = build_html([], [], "s", {}, {}, "对手", "主队")
-        # Assert：SKIP 标"无法定位"、自由文本输入、数字键 1-9、S 跳过、E 采用预填
+        html = build_html([], [], "s", {}, {}, "地平线")
+        # Assert：新单流界面关键标识
         assert "无法定位" in html
-        assert 'id="free"' in html
-        assert '"1" && k <= "9"' in html
-        assert '"s"' in html
-        assert 'id="accept"' in html
-        assert '"e"' in html
-        assert "号码歧义" in html
+        assert 'id="clusterView"' in html
+        assert 'id="ballView"' in html
+        assert "模式一：簇审阅" in html
+        assert "模式二：逐球收尾" in html
+        assert "const PLAYER_KEYS = [" in html
+        assert "function assignCluster(" in html
+        assert "function assignBall(" in html
 
     def test_existing_assignments_inlined(self) -> None:
         # Arrange / Act
-        html = build_html([], [], "s", {"a.mp4#4.1": "黑21"}, {}, "对手", "主队")
+        html = build_html([], [], "s", {"a.mp4#4.1": "黑21"}, {}, "地平线")
         # Assert：已有 roster 归属内联作预填底色
         assert '"a.mp4#4.1": "黑21"' in html
 
     def test_opponent_injected_and_semantic_css(self) -> None:
         # Arrange / Act
-        html = build_html([], [], "20260805_对手队", {}, {}, "对手队", "主队")
-        # Assert：对手队名注入 JS 常量；CSS/类名走语义类（队名随场次、类名固定）
-        assert 'const OPP = "对手队";' in html
+        html = build_html([], [], "20260805_车百鼎", {}, {}, "车百鼎")
+        # Assert：对手队名注入 JS（允许页内覆盖故用 let）
+        assert 'let OPP = "车百鼎";' in html
         assert "team-opp" in html
         assert "team-home" in html
         assert "team-casual" in html
         assert "function teamClass(" in html
-        assert "b.className = teamClass(p.team)" in html
-        assert "const KNOWN_TEAMS = [OPP, " in html
-        # 兜底行：roster team 与当前场次三行不符的队员归"其他"，不静默消失
-        assert "其他（team 口径不符）" in html
+        assert 'OPPONENT_TAG = "对手"' in html
 
 
 class TestMain:
@@ -691,7 +751,7 @@ class TestMain:
                 "--session",
                 "s",
                 "--players",
-                "黑21=测试员甲",
+                "黑21=大斌",
             ]
         )
         # Assert：默认输出 <scorers 同目录>/scorer.html
@@ -710,7 +770,7 @@ class TestMain:
                 {
                     "session": "s",
                     "confirmed": True,
-                    "players": [{"tag": "黑21", "name": "测试员甲", "team": "对手"}],
+                    "players": [{"tag": "黑21", "name": "大斌", "team": "地平线"}],
                     "assignments": {"a.mp4#4.1": "黑21"},
                 },
                 ensure_ascii=False,
@@ -996,17 +1056,18 @@ class TestBuildHtmlClusters:
         )
         page_clusters = build_page_clusters([_cluster()], entries)
         # Act
-        html = build_html(entries, [], "s", {}, {}, "对手", "主队", clusters=page_clusters)
-        # Assert：簇区容器/行样式/代表图引用/簇级选人函数/逐球覆盖注释口径
-        assert 'id="clusters"' in html
-        assert "cluster-row" in html
-        assert "clusterAssign" in html
+        html = build_html(entries, [], "s", {}, {}, "地平线", clusters=page_clusters)
+        # Assert：新簇审阅区容器/代表图/簇级选人函数
+        assert 'id="clusterView"' in html
+        assert 'id="clusterCrops"' in html
+        assert "function assignCluster(" in html
+        assert "function clusterPrefill(" in html
         assert "a_t4.1.jpg" in html
         assert '"cluster_id": 1' in html
 
     def test_no_clusters_renders_empty(self) -> None:
         # Arrange / Act
-        html = build_html([], [], "s", {}, {}, "对手", "主队")
+        html = build_html([], [], "s", {}, {}, "地平线")
         # Assert：无簇数据 → CLUSTERS 空数组，JS 整区隐藏
         assert "const CLUSTERS = [];" in html
 
@@ -1021,18 +1082,17 @@ class TestBuildHtmlClusters:
             None,
             "",
             "",
-            [Player(tag="黑21", name="测试员甲", team="对手")],
+            [Player(tag="黑21", name="大斌", team="地平线")],
             cluster_map={"a.mp4#4.1": 1},
         )
         page_clusters = build_page_clusters([_cluster()], entries)
         html = build_html(
             entries,
-            [Player(tag="黑21", name="测试员甲", team="对手")],
+            [Player(tag="黑21", name="大斌", team="地平线")],
             "s",
             {},
             {},
-            "对手",
-            "主队",
+            "地平线",
             clusters=page_clusters,
         )
         script = html.split("<script>", 1)[1].split("</script>", 1)[0]
@@ -1047,14 +1107,14 @@ class TestBuildHtmlClusters:
 
 
 class TestBuildHtmlClusterMerge:
-    """簇合并+折叠模板断言（docs/scorer-cluster-merge/spec.md）：标识符在，JS 语法合法。"""
+    """新合并子态：M 进入，←/→ 选目标，Enter 确认（spec §4.3-5）。"""
 
     def _html(self) -> str:
         entries = build_entries(
             [_goal()], [_candidate()], None, "", "", cluster_map={"a.mp4#4.1": 1}
         )
         page_clusters = build_page_clusters([_cluster()], entries)
-        return build_html(entries, [], "s", {}, {}, "对手", "主队", clusters=page_clusters)
+        return build_html(entries, [], "s", {}, {}, "地平线", clusters=page_clusters)
 
     def test_cluster_state_layer_present(self) -> None:
         html = self._html()
@@ -1062,53 +1122,146 @@ class TestBuildHtmlClusterMerge:
         assert "function saveClState(" in html
         assert "function groupIdOf(" in html
         assert "function computeGroups(" in html
-        assert "function groupTag(" in html
-        assert "clState.clAssign" in html
-
-    def test_group_render_and_split_present(self) -> None:
-        html = self._html()
-        assert "function splitGroup(" in html
-        assert "function groupLabel(" in html
-        assert "并自" in html
-        assert "row.dataset.gid" in html
-
-    def test_drag_merge_present(self) -> None:
-        html = self._html()
         assert "function mergeInto(" in html
-        assert "row.draggable = true" in html
-        assert "drop-target" in html
-        assert "PICKER-HOOK" in html
+        assert "clState.clAssign" in html
+        assert "done:" in html
+        assert "clState.done" in html
 
-    def test_merge_picker_present(self) -> None:
+    def test_merge_substate_present(self) -> None:
         html = self._html()
-        assert "function openPicker(" in html
-        assert "pickerGid" in html
-        assert "openPicker(dstGid)" in html
-        assert 'className = "picker"' in html
-        assert 'ev.key === "Escape"' in html
+        assert "function startMerge(" in html
+        assert "mergeState" in html
+        assert "merge-target" in html
+        assert "←/→ 选目标" in html
 
-    def test_collapse_present(self) -> None:
+    def test_merge_substate_shields_other_controls(self) -> None:
         html = self._html()
-        assert "function isCollapsed(" in html
-        assert "function toggleCollapse(" in html
-        assert "collapseAll" in html
-        assert "全部展开" in html
+        # 合并子态下清空球员按钮、清空视频、禁用顶栏按钮
+        start = html.index("if (mergeState && mergeState.srcGid === g.gid)")
+        body = html[start : html.index("function renderBallView(", start)]
+        assert 'players.innerHTML = ""' in body
+        assert 'setVideo(video, "")' in body
+        assert "b.disabled = inSubstate" in html
+        assert "inp.disabled = inSubstate" in html
+
+    def test_eject_substate_shields_other_controls(self) -> None:
+        html = self._html()
+        # 剔除子态下清空球员按钮、清空视频、禁用顶栏按钮
+        start = html.index("if (ejectState && ejectState.items.length)")
+        body = html[start : html.index("function renderBallView(", start)]
+        assert 'players.innerHTML = ""' in body
+        assert 'setVideo(video, "")' in body
+        assert "b.disabled = inSubstate" in html
 
 
-class TestBuildHtmlTeamDrag:
-    """队员拖拽改队模板断言（docs/player-team-drag/spec.md）。"""
+class TestBuildHtmlDeleteCluster:
+    """删簇：deleted 墓碑子键，组从簇区隐藏不动归属。"""
 
     def _html(self) -> str:
-        return build_html([], [], "s", {}, {}, "对手队", "主队")
+        entries = build_entries(
+            [_goal()], [_candidate()], None, "", "", cluster_map={"a.mp4#4.1": 1}
+        )
+        page_clusters = build_page_clusters([_cluster()], entries)
+        return build_html(entries, [], "s", {}, {}, "地平线", clusters=page_clusters)
 
-    def test_team_drag_present(self) -> None:
+    def test_delete_cluster_present(self) -> None:
         html = self._html()
+        assert "function deleteCluster(" in html
+        assert "deleted:" in html
+        assert "clState.deleted" in html
+        assert "删除簇#" in html
+
+    def test_deleted_subkey_loaded_and_saved(self) -> None:
+        html = self._html()
+        assert "deleted:" in html
+        assert "clState.deleted" in html
+        assert "localStorage.setItem(CLSTATE_KEY" in html
+        assert "JSON.stringify(clState)" in html
+
+    def test_delete_cluster_marks_done(self) -> None:
+        html = self._html()
+        start = html.index("function deleteCluster(")
+        body = html[start : html.index("function startEject(", start)]
+        assert "clState.done[String(gid)] = true" in body
+
+    def test_delete_cluster_button_in_roster_table(self) -> None:
+        html = self._html()
+        assert 'id="delClusterBtn"' in html
+        assert "delBtn.onclick" in html
+
+
+class TestBuildHtmlRosterTable:
+    """名单表格：内联改姓名、select 改队、对手队名覆盖（spec §4.1/4.3-10/4.3-11）。"""
+
+    def _html(self) -> str:
+        return build_html(
+            [],
+            [
+                Player(tag="白22-小朱", name="小朱", team="半截篮"),
+                Player(tag="黑21-大斌", name="大斌", team="地平线"),
+            ],
+            "s",
+            {},
+            {},
+            "地平线",
+        )
+
+    def test_roster_table_present(self) -> None:
+        html = self._html()
+        assert 'id="rosterTable"' in html
+        assert "function renderRosterTable(" in html
+        assert 'class="name-input"' in html
+        assert 'class="team-select"' in html
+
+    def test_name_and_team_keys_present(self) -> None:
+        html = self._html()
+        assert '"_names"' in html
         assert '"_teamovr"' in html
-        assert "function changeTeam(" in html
+        assert "function saveNames(" in html
         assert "function saveTeamOvr(" in html
-        assert "div.dataset.team" in html
-        assert "b.draggable = true" in html
-        assert "text/player-tag" in html
+
+    def test_opponent_name_override_present(self) -> None:
+        html = self._html()
+        assert 'id="oppInput"' in html
+        assert '"_oppname"' in html
+        assert "function saveOppName(" in html
+
+    def test_select_focus_shields_shortcuts(self) -> None:
+        html = self._html()
+        assert "function isInputFocused(" in html
+        assert 'el.tagName === "SELECT"' in html
+
+
+class TestBuildHtmlBallMode:
+    """模式二逐球收尾布局与过滤。"""
+
+    def _html(self) -> str:
+        return build_html([], [], "s", {}, {}, "车百鼎")
+
+    def test_ball_view_present(self) -> None:
+        html = self._html()
+        assert 'id="ballView"' in html
+        assert 'id="ballInfo"' in html
+        assert 'id="ballPlayers"' in html
+        assert 'id="ballFilter"' in html
+        assert "function renderBallView(" in html
+        assert "function renderBallFilter(" in html
+
+    def test_review_flex_and_hover_zoom_present(self) -> None:
+        html = self._html()
+        assert 'id="review"' in html
+        assert "align-items: flex-start" in html
+        assert "68vh" in html
+        assert "#review #crop:hover" in html
+
+    def test_no_clusters_fallback_to_ball_mode(self) -> None:
+        # Arrange / Act：无 --clusters（CLUSTERS 空数组）时 JS 直接进模式二
+        html = build_html([], [], "s", {}, {}, "车百鼎")
+        # Assert
+        assert "const CLUSTERS = [];" in html
+        assert "if (!CLUSTERS.length || !pendingGroups().length)" in html
+        assert "模式二：逐球收尾" in html
+        assert 'id="ballView"' in html
 
 
 class TestMainClusters:
@@ -1159,7 +1312,7 @@ class TestMainClusters:
                 "--clusters",
                 str(clusters),
                 "--players",
-                "黑21=测试员甲",
+                "黑21=大斌",
             ]
         )
         # Assert
@@ -1188,286 +1341,52 @@ class TestMainClusters:
             main(["--scorers", str(scorers), "--goals", str(goals), "--clusters", str(other)])
 
 
-class TestBuildHtmlStepBars:
-    """三步引导标题条（docs/scorer-three-step/spec.md）：判队伍/并簇认人/逐球核对。"""
-
-    def _html(self, with_clusters: bool = True) -> str:
-        if with_clusters:
-            entries = build_entries(
-                [_goal()], [_candidate()], None, "", "", cluster_map={"a.mp4#4.1": 1}
-            )
-            page_clusters = build_page_clusters([_cluster()], entries)
-            return build_html(entries, [], "s", {}, {}, "对手", "主队", clusters=page_clusters)
-        return build_html([], [], "s", {}, {}, "对手", "主队")
-
-    def test_step_bars_present(self) -> None:
-        # Arrange / Act
-        html = self._html()
-        # Assert
-        assert "stepbar" in html
-        assert "第一步：判队伍" in html
-        assert "第二步：并簇认人" in html
-        assert "第三步：逐球核对" in html
-
-    def test_step2_toggles_with_clusters(self) -> None:
-        # Arrange / Act：无簇页面也要有 step2 元素 + JS 开关（随簇区隐藏）
-        html = self._html(with_clusters=False)
-        # Assert
-        assert 'id="step2"' in html
-        assert 'getElementById("step2")' in html
-
-
-class TestBuildHtmlDeleteCluster:
-    """删簇（docs/scorer-three-step/spec.md）：deleted 墓碑子键，组从簇区隐藏不动归属。"""
-
-    def _html(self) -> str:
-        entries = build_entries(
-            [_goal()], [_candidate()], None, "", "", cluster_map={"a.mp4#4.1": 1}
-        )
-        page_clusters = build_page_clusters([_cluster()], entries)
-        return build_html(entries, [], "s", {}, {}, "对手", "主队", clusters=page_clusters)
-
-    def test_delete_cluster_present(self) -> None:
-        # Arrange / Act
-        html = self._html()
-        # Assert
-        assert "function deleteCluster(" in html
-        assert "deleted:" in html
-        assert "clState.deleted" in html
-        assert "删除簇#" in html
-
-    def test_deleted_subkey_loaded_and_saved(self) -> None:
-        # Arrange / Act
-        html = self._html()
-        # Assert：加载白名单与 saveClState 合并分支都带上 deleted
-        assert '"deleted"' in html
-        assert "stored.deleted" in html
-
-
-class TestBuildHtmlRename:
-    """页内改真名（docs/scorer-three-step/spec.md）：独立 _names 键，清空=写空串不删键。"""
-
-    def _html(self) -> str:
-        return build_html([], [], "s", {}, {}, "对手队", "主队")
-
-    def test_rename_present(self) -> None:
-        # Arrange / Act
-        html = self._html()
-        # Assert
-        assert '"_names"' in html
-        assert "function renamePlayer(" in html
-        assert "function saveNames(" in html
-        assert "改名" in html
-
-    def test_rename_entry_in_player_rows(self) -> None:
-        # Arrange / Act
-        html = self._html()
-        # Assert：改名钮只挂队伍区（含兜底行）按钮旁，簇区/弹条不加
-        assert "renamePlayer(p.tag)" in html
-
-
-class TestBuildHtmlReviewByPlayer:
-    """按人核对（docs/scorer-three-step/spec.md）：_review 键 + 可见集过滤 + 位置分键。"""
-
-    def _html(self) -> str:
-        return build_html([], [], "s", {}, {}, "对手队", "主队")
-
-    def test_review_state_present(self) -> None:
-        # Arrange / Act
-        html = self._html()
-        # Assert
-        assert '"_review"' in html
-        assert "function reviewTarget(" in html
-        assert "function visible(" in html
-        assert "function renderReviewBar(" in html
-        assert "function posKey(" in html
-
-    def test_review_bar_and_special_value(self) -> None:
-        # Arrange / Act
-        html = self._html()
-        # Assert
-        assert "核对对象" in html
-        assert "__none__" in html
-        assert 'id="reviewbar"' in html
-
-    def test_free_input_rejects_none_sentinel(self) -> None:
-        # Arrange / Act：自由输入拒绝 __none__（防撞未归属特殊值）
-        html = self._html()
-        # Assert
-        assert 'tag === "__none__"' in html
-
-
-class TestBuildHtmlReviewLayout:
-    """逐球区布局（docs/scorer-three-step/spec.md）：#review flex 定高不定宽 + 悬停放大浮层。"""
-
-    def _html(self) -> str:
-        return build_html([], [], "s", {}, {}, "对手队", "主队")
-
-    def test_review_flex_present(self) -> None:
-        # Arrange / Act
-        html = self._html()
-        # Assert
-        assert 'id="review"' in html
-        assert "align-items: flex-start" in html
-        assert "68vh" in html
-
-    def test_hover_zoom_present(self) -> None:
-        # Arrange / Act：悬停浮层规则须在（点击放大已证伪）
-        html = self._html()
-        # Assert
-        assert "#review #crop:hover" in html
-        assert "img.rep:hover" in html
-
-
-class TestBuildHtmlClickMerge:
-    """点选合并（docs/scorer-click-merge/spec.md）：与拖拽并存，复用 mergeInto 语义。"""
-
-    def _html(self) -> str:
-        entries = build_entries(
-            [_goal()], [_candidate()], None, "", "", cluster_map={"a.mp4#4.1": 1}
-        )
-        page_clusters = build_page_clusters([_cluster()], entries)
-        return build_html(entries, [], "s", {}, {}, "对手", "主队", clusters=page_clusters)
-
-    def test_click_merge_present(self) -> None:
-        # Arrange / Act
-        html = self._html()
-        # Assert
-        assert "function pickMerge(" in html
-        assert "let mergeSrc = null" in html
-        assert "并入这里" in html
-        assert "merge-src" in html
-
-    def test_drag_merge_untouched(self) -> None:
-        # Arrange / Act：拖拽路径标识符原样保留（两套并存）
-        html = self._html()
-        # Assert
-        assert "row.draggable = true" in html
-        assert "text/plain" in html
-        assert "function mergeInto(" in html
-
-
 class TestBuildHtmlNoGoalTag:
-    """不算进球标签（docs/scorer-nogoal-tag/spec.md）：页面剔除假进球，导出自动过滤。"""
+    """不算进球标签：NOGOAL 哨兵，导出自动过滤。"""
 
     def _html(self) -> str:
-        return build_html([], [], "s", {}, {}, "对手队", "主队")
+        return build_html([], [], "s", {}, {}, "车百鼎")
 
     def test_nogoal_present(self) -> None:
-        # Arrange / Act
         html = self._html()
-        # Assert
         assert 'const NOGOAL = "不算进球"' in html
-        assert 'id="nogoal"' in html
-        assert 'k === "n"' in html
+        assert 'k.toLowerCase() === "n"' in html
 
     def test_export_strips_nogoal(self) -> None:
-        # Arrange / Act
         html = self._html()
-        # Assert：assignments 收集过滤哨兵 + alert 报剔除数
         assert "t !== NOGOAL" in html
         assert "已剔除不参与合成" in html
 
-    def test_picker_shields_n_key(self) -> None:
-        # Arrange / Act：弹条期间 N 与 1-9/E 同屏蔽（防误触静默剔除当前球）
-        html = self._html()
-        # Assert
-        assert '|| k === "n") return;' in html
-
 
 class TestAcceptAllPrefills:
-    """「接受全部号码预填」按钮（docs/read-numbers-batch/ Phase 2）。"""
+    """P 键批量接受号码/照片预填（新设计函数名 clusterAcceptAllPrefills）。"""
 
-    def test_button_rendered_with_handler(self) -> None:
-        html = build_html([], [], "s", {}, {}, "对手", "主队")
-        assert 'id="acceptall"' in html
-        assert "接受全部号码预填" in html
-        assert 'getElementById("acceptall").onclick = acceptAllPrefills' in html
-
-    def test_guard_conditions_locked(self) -> None:
-        # 守卫口径锁定：仅 prefill_tag 非空且未 touched 的球；不写 touched；
-        # 歧义球计数跳过；幂等（已是该预填不重复计数）
-        html = build_html([], [], "s", {}, {}, "对手", "主队")
-        start = html.index("function acceptAllPrefills")
-        body = html[start : html.index("document.getElementById", start)]
+    def test_function_present_and_guards(self) -> None:
+        html = build_html([], [], "s", {}, {}, "地平线")
+        assert "function clusterAcceptAllPrefills" in html
+        start = html.index("function clusterAcceptAllPrefills")
+        body = html[start : html.index("alert(", start)]
         assert "if (!it.prefill_tag) continue;" in body
         assert "if (touched[it.key])" in body
         assert 'it.prefill_note === "ambiguous"' in body
         assert "marks[it.key] = it.prefill_tag;" in body
-        assert "touched[it.key] = true" not in body  # 批量接受不标已核（预填非终裁）
+        assert "touched[it.key] = true" not in body
 
     def test_acceptall_splits_photo_count(self) -> None:
-        # 照片预填与号码预填拆分计数（review MEDIUM-1）：note==="photo" 计照片，
-        # 其余（含无 note 旧数据）计号码；按钮 title 同步口径
-        html = build_html([], [], "s", {}, {}, "对手", "主队")
-        start = html.index("function acceptAllPrefills")
-        body = html[start : html.index("document.getElementById", start)]
+        html = build_html([], [], "s", {}, {}, "地平线")
+        start = html.index("function clusterAcceptAllPrefills")
+        body = html[start : html.index("alert(", start)]
         assert 'it.prefill_note === "photo"' in body
         assert "nPhoto" in body
-        assert "个预填（号码 " in body
-        assert " / 照片 " in body
-        assert "号码/照片预填" in html  # 按钮 title
+        # 计数文案在 alert 中
+        assert "个预填" in html
 
     def test_acceptall_js_syntax_node_check(self, tmp_path: pathlib.Path) -> None:
         # node 不在 PATH 则跳过（沿用现有同款模式，防模板改动引入 JS 语法错）
         node = shutil.which("node")
         if node is None:
             pytest.skip("node 不在 PATH")
-        html = build_html([], [], "s", {}, {}, "对手", "主队")
-        script = html.split("<script>", 1)[1].split("</script>", 1)[0]
-        js_path = tmp_path / "page.js"
-        js_path.write_text(script, encoding="utf-8")
-        proc = subprocess.run(  # noqa: S603 node 路径来自 shutil.which，可信
-            [node, "--check", str(js_path)], capture_output=True, text=True, check=False
-        )
-        assert proc.returncode == 0, proc.stderr
-
-
-class TestBuildHtmlRosterExport:
-    """roster 导出自动落位：fetch POST + 错误分流 + 成功提示（docs/export-autosave Phase 2）。"""
-
-    def _html(self) -> str:
-        return build_html([], [], "s", {}, {}, "对手", "主队")
-
-    def test_export_uses_fetch_post(self) -> None:
-        html = self._html()
-        assert '"/api/sessions/" + encodeURIComponent(SESSION) + "/roster-export"' in html
-        assert 'method: "POST"' in html
-        assert "JSON.stringify({ data: payload })" in html
-
-    def test_export_success_alert_with_path_and_stats(self) -> None:
-        html = self._html()
-        assert "已保存到 " in html
-        assert "j.path" in html
-        assert "j.n_assignments" in html
-        assert "confirmed=" in html
-
-    def test_export_error_branches(self) -> None:
-        html = self._html()
-        assert "服务端返回：" in html
-        assert "服务端异常（" in html
-        assert "服务器保存失败（" in html
-        assert "已改为下载，请手动移到 work 场次目录" in html
-
-    def test_export_fallback_blob_still_named_roster_json(self) -> None:
-        html = self._html()
-        start = html.index("function exportRoster")
-        body = html[start : html.index("function acceptAllPrefills", start)]
-        assert 'a.download = "roster.json"' in body
-        assert "new Blob([JSON.stringify(payload, null, 1)]" in body
-
-    def test_export_no_new_named_function_between_export_and_acceptall(self) -> None:
-        html = self._html()
-        start = html.index("function exportRoster")
-        body = html[start : html.index("function acceptAllPrefills", start)]
-        # 不允许在两者之间插入新的命名函数（tests 按该区间切片断言）
-        assert body.count("function ") == 1
-
-    def test_export_js_syntax_node_check(self, tmp_path: pathlib.Path) -> None:
-        node = shutil.which("node")
-        if node is None:
-            pytest.skip("node 不在 PATH")
-        html = self._html()
+        html = build_html([], [], "s", {}, {}, "地平线")
         script = html.split("<script>", 1)[1].split("</script>", 1)[0]
         js_path = tmp_path / "page.js"
         js_path.write_text(script, encoding="utf-8")
@@ -1497,46 +1416,44 @@ def _photo_payload(matches: dict) -> dict:
 
 
 class TestResolvePhotoGuesses:
-    """照片命中号码 → 名单 tag；名单缺号注入占位条目（主队<号>，team=主队）。"""
+    """照片命中号码 → 名单 tag；名单缺号注入占位条目（半截篮<号>，team=半截篮）。"""
 
     def test_number_in_players_resolves_tag(self) -> None:
         # Arrange
-        players = [Player(tag="白7-小朱", name="小朱", team="主队")]
+        players = [Player(tag="白7-小朱", name="小朱", team="半截篮")]
         # Act
-        guesses, extra = resolve_photo_guesses({"a.mp4#4.1": _photo_entry("7")}, players, "主队")
+        guesses, extra = resolve_photo_guesses({"a.mp4#4.1": _photo_entry("7")}, players)
         # Assert：号码在名单唯一命中，直接解析到该球员 tag，无占位
         assert guesses["a.mp4#4.1"] == PhotoGuess(number="7", score=0.61, tag="白7-小朱")
         assert extra == []
 
     def test_missing_number_placeholder_injected(self) -> None:
         # Arrange：名单里没有 9 号
-        players = [Player(tag="白7-小朱", name="小朱", team="主队")]
+        players = [Player(tag="白7-小朱", name="小朱", team="半截篮")]
         # Act
-        guesses, extra = resolve_photo_guesses({"a.mp4#4.1": _photo_entry("9")}, players, "主队")
-        # Assert：占位 tag=主队9、name 空、team=主队（不靠前缀推队）
-        assert guesses["a.mp4#4.1"].tag == "主队9"
-        assert extra == [Player(tag="主队9", name="", team="主队")]
+        guesses, extra = resolve_photo_guesses({"a.mp4#4.1": _photo_entry("9")}, players)
+        # Assert：占位 tag=半截篮9、name 空、team=半截篮（不靠前缀推队）
+        assert guesses["a.mp4#4.1"].tag == "半截篮9"
+        assert extra == [Player(tag="半截篮9", name="", team="半截篮")]
 
     def test_same_missing_number_single_placeholder(self) -> None:
         # Arrange / Act：两球命中同一缺号号码
         guesses, extra = resolve_photo_guesses(
-            {"a.mp4#4.1": _photo_entry("9"), "b.mp4#2.0": _photo_entry("9")}, [], "主队"
+            {"a.mp4#4.1": _photo_entry("9"), "b.mp4#2.0": _photo_entry("9")}, []
         )
         # Assert：占位条目只注入一份，两球都指向它
         assert len(extra) == 1
-        assert {g.tag for g in guesses.values()} == {"主队9"}
+        assert {g.tag for g in guesses.values()} == {"半截篮9"}
 
     def test_ambiguous_number_in_players_no_guess(self, caplog: pytest.LogCaptureFixture) -> None:
         # Arrange：名单里同号两人（白7/红7）→ 交人裁判不预填
         players = [
-            Player(tag="白7-小朱", name="小朱", team="主队"),
-            Player(tag="红7-老张", name="", team="主队"),
+            Player(tag="白7-小朱", name="小朱", team="半截篮"),
+            Player(tag="红7-老张", name="", team="半截篮"),
         ]
         # Act
         with caplog.at_level(logging.WARNING):
-            guesses, extra = resolve_photo_guesses(
-                {"a.mp4#4.1": _photo_entry("7")}, players, "主队"
-            )
+            guesses, extra = resolve_photo_guesses({"a.mp4#4.1": _photo_entry("7")}, players)
         # Assert
         assert guesses == {}
         assert extra == []
@@ -1549,8 +1466,8 @@ class TestPhotoPrefillPriority:
     @staticmethod
     def _players() -> list[Player]:
         return [
-            Player(tag="白22-小朱", name="小朱", team="主队"),
-            Player(tag="白7-老黄", name="老黄", team="主队"),
+            Player(tag="白22-小朱", name="小朱", team="半截篮"),
+            Player(tag="白7-老黄", name="老黄", team="半截篮"),
         ]
 
     @staticmethod
@@ -1642,8 +1559,8 @@ class TestPhotoPrefillPriority:
     def test_number_ambiguous_not_overridden_by_photo(self) -> None:
         # Arrange：读号同号歧义 + 照片命中 → 维持歧义不预填，照片候选仍随条目上页
         players = [
-            Player(tag="白22-小朱", name="小朱", team="主队"),
-            Player(tag="白22-测试员甲", name="测试员甲", team="主队"),
+            Player(tag="白22-小朱", name="小朱", team="半截篮"),
+            Player(tag="白22-大斌", name="大斌", team="半截篮"),
         ]
         cand = _candidate()
         cand["number_guess"] = {
@@ -1660,12 +1577,12 @@ class TestPhotoPrefillPriority:
             "",
             "",
             players,
-            photo_guesses=self._photo_guess(tag="主队7"),
+            photo_guesses=self._photo_guess(tag="半截篮7"),
         )
         # Assert
         assert entries[0]["prefill_tag"] == ""
         assert entries[0]["prefill_note"] == "ambiguous"
-        assert entries[0]["photo_guess"]["tag"] == "主队7"
+        assert entries[0]["photo_guess"]["tag"] == "半截篮7"
 
     def test_no_photo_param_entries_photo_guess_none(self) -> None:
         # Arrange / Act：不传 photo_guesses（无 --photo-matches 口径）
@@ -1709,21 +1626,14 @@ class TestPhotoPrefillPriority:
 
 
 class TestPhotoBadgeHtml:
-    """照片预填/冲突角标模板断言：按钮元素、展示口径、点击切换。"""
+    """照片预填：新设计在 ballInfo 展示预填来源，不再出角标按钮。"""
 
-    def test_photo_badge_present(self) -> None:
-        # Arrange / Act
-        html = build_html([], [], "s", {}, {}, "对手", "主队")
-        # Assert：角标按钮 + 展示文案 + 点击切换挂钩
-        assert 'id="photoaccept"' in html
-        assert "照片预填" in html
-        assert "照片候选" in html
-        assert "photo_guess" in html
-        assert "改用照片:" in html
-        assert "pgb.onclick" in html
+    def test_photo_prefill_displayed_in_ball_info(self) -> None:
+        html = build_html([], [], "s", {}, {}, "地平线")
+        assert "预填:" in html
+        assert "photo" in html
 
     def test_photo_js_syntax_node_check(self, tmp_path: pathlib.Path) -> None:
-        # node 不在 PATH 则跳过（沿用现有同款模式，防模板改动引入 JS 语法错）
         node = shutil.which("node")
         if node is None:
             pytest.skip("node 不在 PATH")
@@ -1733,17 +1643,16 @@ class TestPhotoBadgeHtml:
             None,
             "",
             "",
-            [Player(tag="白7-老黄", name="老黄", team="主队")],
+            [Player(tag="白7-老黄", name="老黄", team="半截篮")],
             photo_guesses={"a.mp4#4.1": PhotoGuess(number="7", score=0.5, tag="白7-老黄")},
         )
         html = build_html(
             entries,
-            [Player(tag="白7-老黄", name="老黄", team="主队")],
+            [Player(tag="白7-老黄", name="老黄", team="半截篮")],
             "s",
             {},
             {},
-            "对手",
-            "主队",
+            "地平线",
         )
         script = html.split("<script>", 1)[1].split("</script>", 1)[0]
         js_path = tmp_path / "page.js"
@@ -1795,6 +1704,7 @@ class TestPhotoMatchesCli:
             ]
         )
         # Assert：占位条目随 players 注入页面（不靠前缀推队），条目带 photo_guess
+        # 向导仓默认 team_config.team_name="主队"，占位 tag=主队9
         assert rc == 0
         html = (scorers.parent / "scorer.html").read_text(encoding="utf-8")
         assert '"tag": "主队9"' in html
@@ -1855,7 +1765,7 @@ class TestPhotoMatchesCli:
         assert rc == 0
         html = (scorers.parent / "scorer.html").read_text(encoding="utf-8")
         assert '"photo_guess": null' in html
-        assert "主队9" not in html
+        assert "半截篮9" not in html
 
 
 # ---- --track-links 轨迹传播预填（docs/scorer-propagate/spec.md §页面） ----
@@ -2085,7 +1995,7 @@ class TestTrackPropagatePageJs:
 
     def _html(self) -> str:
         entries = build_entries([_goal()], [_candidate()], None, "", "", track_map={"a.mp4#4.1": 3})
-        return build_html(entries, [], "s", {}, {}, "对手", "主队")
+        return build_html(entries, [], "s", {}, {}, "地平线")
 
     def test_track_label_and_badge_rendered(self) -> None:
         # Arrange / Act
@@ -2104,12 +2014,9 @@ class TestTrackPropagatePageJs:
         assert "localStorage.setItem(PROPKEY, JSON.stringify(propagateAssign))" in html
 
     def test_propagate_from_guards(self) -> None:
-        # Arrange / Act
         html = self._html()
         start = html.index("function propagateFrom")
-        body = html[start : html.index("function assign(", start)]
-        # Assert：NOGOAL 不传播；只写无 marks/无 prefill_tag/未 touched 的同文件同轨迹球；
-        # 写 marks 并记 provenance
+        body = html[start : html.index("function exportRoster", start)]
         assert "if (tag === NOGOAL) return;" in body
         assert "it.file !== src.file || it.track_id !== src.track_id" in body
         assert "marks[it.key] || it.prefill_tag || touched[it.key]" in body
@@ -2117,28 +2024,28 @@ class TestTrackPropagatePageJs:
         assert "propagateAssign[it.key] = true;" in body
 
     def test_assign_triggers_propagation(self) -> None:
-        # Arrange / Act
         html = self._html()
-        start = html.index("function assign(tag)")
-        body = html[start : html.index("function skip(", start)]
-        # Assert：逐球归属（含 E 键/球员按钮共用的 assign）触发传播
-        assert "propagateFrom(vis[cur].key, tag);" in body
+        start = html.index("function assignBall(")
+        body = html[start : html.index("function skipBall(", start)]
+        assert "propagateFrom(it.key, tag);" in body
+
+    def test_cluster_assign_triggers_propagation(self) -> None:
+        html = self._html()
+        start = html.index("function assignCluster(")
+        body = html[start : html.index("function clusterAdoptPrefill(", start)]
+        assert "propagateFrom(k, tag);" in body
 
     def test_acceptall_isolated_from_propagation(self) -> None:
-        # Arrange / Act
         html = self._html()
-        start = html.index("function acceptAllPrefills")
-        body = html[start : html.index("document.getElementById", start)]
-        # Assert：acceptAll 只收 prefill_tag，不碰传播预填 provenance
+        start = html.index("function clusterAcceptAllPrefills")
+        body = html[start : html.index("alert(", start)]
         assert "propagateAssign" not in body
         assert "if (!it.prefill_tag) continue;" in body
 
     def test_export_unchanged_uses_marks(self) -> None:
-        # Arrange / Act
         html = self._html()
         start = html.index("function exportRoster")
-        body = html[start : html.index("function acceptAllPrefills", start)]
-        # Assert：导出照旧 marks 全集（传播预填随 marks 进 assignments，无需特判）
+        body = html[start : html.index("function setVideo(", start)]
         assert "Object.entries(marks)" in body
         assert "propagateAssign" not in body
 
@@ -2148,124 +2055,6 @@ class TestTrackPropagatePageJs:
         if node is None:
             pytest.skip("node 不在 PATH")
         html = self._html()
-        script = html.split("<script>", 1)[1].split("</script>", 1)[0]
-        js_path = tmp_path / "page.js"
-        js_path.write_text(script, encoding="utf-8")
-        proc = subprocess.run(  # noqa: S603 node 路径来自 shutil.which，可信
-            [node, "--check", str(js_path)], capture_output=True, text=True, check=False
-        )
-        assert proc.returncode == 0, proc.stderr
-
-
-class TestOpponentTag:
-    """opponent-filter T2：伪球员"对手"注入页面、teamOfTag 两端特判、
-    逐球标为对手/撤销按钮、整簇按钮随 PLAYERS 循环、导出零引用剔除。"""
-
-    def test_pseudo_player_injected_with_effective_opp_team(self) -> None:
-        # Arrange / Act
-        html = build_html([], [], "s", {}, {}, "闪电队", "主队")
-        # Assert：伪球员注入 PLAYERS 且 team=有效对手名；OPP_TAG 常量注入
-        assert '"tag": "对手"' in html
-        assert '"name": ""' in html
-        assert '"team": "闪电队"' in html
-        assert 'const OPP_TAG = "对手";' in html
-
-    def test_pseudo_player_not_duplicated_when_user_defined(self) -> None:
-        # Arrange：用户名单已自带"对手"标签
-        players = [Player(tag="对手", name="对面", team="闪电队")]
-        # Act
-        html = build_html([], players, "s", {}, {}, "闪电队", "主队")
-        # Assert：不重复注入（用户定义优先）
-        assert html.count('"tag": "对手"') == 1
-        assert '"name": "对面"' in html
-
-    def test_team_of_tag_guard_both_ends(self) -> None:
-        # Arrange / Act
-        html = build_html([], [], "s", {}, {}, "闪电队", "主队")
-        # Assert：JS 端特判（不走黑/蓝/白前缀推队，防误判便服）；Python 端同规则
-        assert "if (tag === OPP_TAG) return OPP;" in html
-        assert team_of_tag("对手", "闪电队", "主队") == "闪电队"
-
-    def test_oppmark_button_toggle(self) -> None:
-        # Arrange / Act
-        html = build_html([], [], "s", {}, {}, "对手", "主队")
-        # Assert：逐球按钮 + 已标后可撤销（unassign 删 marks/touched）
-        assert 'id="oppmark"' in html
-        assert "标为对手" in html
-        assert "撤销对手标记" in html
-        start = html.index("function unassign()")
-        body = html[start : html.index("function exportRoster", start)]
-        assert "delete marks[key];" in body
-        assert "delete touched[key];" in body
-
-    def test_export_filters_unused_pseudo_player(self) -> None:
-        # Arrange / Act
-        html = build_html([], [], "s", {}, {}, "对手", "主队")
-        # Assert：导出 roster 时伪球员零引用不进 players（有引用才保留）
-        start = html.index("function exportRoster")
-        body = html[start : html.index("function acceptAllPrefills", start)]
-        assert "used.has(OPP_TAG)" in body
-
-    def test_oppmark_js_syntax_node_check(self, tmp_path: pathlib.Path) -> None:
-        # node 不在 PATH 则跳过（沿用现有同款模式）
-        node = shutil.which("node")
-        if node is None:
-            pytest.skip("node 不在 PATH")
-        html = build_html([], [], "s", {}, {}, "对手", "主队")
-        script = html.split("<script>", 1)[1].split("</script>", 1)[0]
-        js_path = tmp_path / "page.js"
-        js_path.write_text(script, encoding="utf-8")
-        proc = subprocess.run(  # noqa: S603 node 路径来自 shutil.which，可信
-            [node, "--check", str(js_path)], capture_output=True, text=True, check=False
-        )
-        assert proc.returncode == 0, proc.stderr
-
-
-class TestOpponentPrefill:
-    """opponent-prefill：team_guess="黑" 自动出对手预填 + 一键全收（预填非终裁）。"""
-
-    def test_black_team_guess_shows_opponent_prefill_hint(self) -> None:
-        # Arrange / Act
-        html = build_html([], [], "s", {}, {}, "对手", "主队")
-        # Assert：黑→对手预填提示；白/便服仍走颜色预填（分支顺序：对手预填优先）
-        assert 'info += " | 对手预填:黑";' in html
-        start = html.index("对手预填:黑")
-        assert html.index("颜色预填:", start) > start
-
-    def test_oppmark_button_text_accept_prefill_for_black(self) -> None:
-        # Arrange / Act
-        html = build_html([], [], "s", {}, {}, "对手", "主队")
-        # Assert：黑候选球按钮文案变"接受对手预填"，非候选仍"标为对手"
-        assert 'it.team_guess === "黑"' in html
-        assert "接受对手预填" in html
-        assert "标为对手" in html
-
-    def test_accept_all_opponent_prefills_button(self) -> None:
-        # Arrange / Act
-        html = build_html([], [], "s", {}, {}, "对手", "主队")
-        # Assert：一键全收按钮 + 批量函数只写未归属未手改的黑候选球
-        assert 'id="acceptopp"' in html
-        assert "接受全部对手预填" in html
-        start = html.index("function acceptAllOpponent")
-        body = html[start : html.index("function exportRoster", start)]
-        assert 'it.team_guess !== "黑"' in body
-        assert "touched[it.key]" in body
-        assert "marks[it.key] = OPP_TAG;" in body
-
-    def test_prefill_not_written_to_marks_before_accept(self) -> None:
-        # Arrange / Act
-        html = build_html([], [], "s", {}, {}, "对手", "主队")
-        # Assert：预填只是提示——show() 的提示分支（到 number_guess 前）不写 marks
-        start = html.index("对手预填:黑")
-        end = html.index("const ng =", start)
-        assert "marks[" not in html[start:end]
-
-    def test_accept_all_opponent_js_syntax_node_check(self, tmp_path: pathlib.Path) -> None:
-        # node 不在 PATH 则跳过（沿用现有同款模式）
-        node = shutil.which("node")
-        if node is None:
-            pytest.skip("node 不在 PATH")
-        html = build_html([], [], "s", {}, {}, "对手", "主队")
         script = html.split("<script>", 1)[1].split("</script>", 1)[0]
         js_path = tmp_path / "page.js"
         js_path.write_text(script, encoding="utf-8")
