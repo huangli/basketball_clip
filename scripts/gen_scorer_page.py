@@ -60,7 +60,7 @@ from typing import TYPE_CHECKING, Any
 from errors import BasketballPipelineError, SchemaError
 from pipe_common import configure_logging, new_run_id, read_json
 from roster import OPPONENT_TAG, Player, format_key, opponent_of, player_from_dict, validate_roster
-from team_config import DEFAULT_OPPONENT, TeamConfig, load_team_config
+from team_config import DEFAULT_OPPONENT, DEFAULT_TEAM_NAME, TeamConfig, load_team_config
 
 if TYPE_CHECKING:
     # 仅类型注解用；运行时延迟 import（photo_match_scorers 链带 numpy/sklearn，
@@ -1013,9 +1013,11 @@ function renderClusterView() {
   const clipItem = items.find(it => it.clip) || null;
   setVideo(video, clipItem ? clipItem.clip : "");
   const prefill = clusterPrefill(g);
+  const colorHint = color.color === "黑" ? " · 黑球衣可接受对手预填" : "";
   hint.innerHTML = "选人键整簇归属；Enter" + (isEAlias() ? "/E" : "") +
     (prefill ? " 采纳预填" + prefill : "（无唯一预填）") +
-    " · P 接受全场预填 · O 对手 · N 不算 · S 跳过 · M 合并 · X 剔除 · ←/→ 翻簇";
+    " · P 接受全场预填 · O 对手 · N 不算 · S 跳过 · M 合并 · X 剔除 · ←/→ 翻簇" +
+    colorHint;
   if (!mergeState) renderPlayerButtons("clusterPlayers", tag => assignCluster(tag));
   if (mergeState && mergeState.srcGid === g.gid) {
     setVideo(video, "");
@@ -1065,6 +1067,7 @@ function renderBallView() {
   if (it.track_id != null) s += " | 轨迹#" + it.track_id;
   if (it.status === "SKIP") s += " | 无法定位";
   else if (it.prefill_tag) s += " | 预填:" + it.prefill_tag;
+  else if (it.team_guess === "黑") s += " | 对手预填:黑";
   else if (it.team_guess) s += " | 颜色:" + it.team_guess;
   if (marks[it.key] && propagateAssign[it.key] && !touched[it.key]) s += " | 同轨迹预填";
   info.textContent = s;
@@ -1178,6 +1181,7 @@ document.getElementById("export").onclick = exportRoster;
 document.getElementById("undo").onclick = undo;
 document.getElementById("toggleroster").onclick = toggleRoster;
 document.getElementById("modebtn").onclick = toggleMode;
+document.getElementById("acceptopp").onclick = acceptAllOpponent;
 document.getElementById("oppInput").onchange = (ev) => {
   pushUndo("改对手队名");
   oppNameOvr = ev.target.value.trim();
