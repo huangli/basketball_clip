@@ -17,9 +17,10 @@
     dist/basketball-clip/basketball-clip.exe   入口（GUI / scripts 分发双态）
     dist/basketball-clip/_internal/            运行时 + gui/static + assets（ffmpeg/CLIP）
     dist/basketball-clip/scripts/              打包后从仓库拷贝（子进程分发实体）
-    dist/basketball-clip/models/*.pt          打包后拷贝（yolov8n.pt 走 packaging 资产；
-                                              abdullahtarek_ball.pt 从仓库 models/ 取，
-                                              scripts 按 cwd 相对路径读）
+    dist/basketball-clip/models/yolov8n.pt    打包后拷贝（走 packaging 资产）；
+                                              abdullahtarek_ball.pt 再分发权利未确认，
+                                              **不随安装包分发**，首运行时由
+                                              scripts/model_fetch.py 自动下载
     dist/basketball-clip/pyproject.toml        打包后拷贝（diagnostics 版本解析）
     dist/basketball-clip/work|output|photos/   运行时生成（exe 同级，用户可写）
 
@@ -165,28 +166,28 @@ def _copy_tree_fresh(src: Path, dst: Path, *, what: str) -> None:
 
 
 def stage_runtime_files(app_dir: Path) -> None:
-    """exe 同级补料：scripts/ 实体、models/*.pt、pyproject.toml。
+    """exe 同级补料：scripts/ 实体、models/yolov8n.pt、pyproject.toml。
 
     这三类必须落在用户可写的 exe 同级目录而非 _internal：video.py relocate 以
     ``__file__`` 推导仓库根并 chdir（work/ 等相对路径基准），models/ 由 scripts
     按 cwd 相对路径读取（mot_candidates 需要 yolov8n.pt + abdullahtarek_ball.pt
-    两个模型，缺球模型检测即 FileNotFoundError——2026-09-13 漏暂存实踩），
+    两个模型；球模型再分发权利未确认不随包分发，缺失时由 scripts/model_fetch.py
+    首运行自动下载，2026-09-13 漏暂存 yolov8n 实踩），
     pyproject.toml 供 diagnostics 解析版本。
     """
     _copy_tree_fresh(REPO_ROOT / "scripts", app_dir / "scripts", what="scripts/")
     model_dst_dir = app_dir / "models"
     model_dst_dir.mkdir(parents=True, exist_ok=True)
-    # yolov8n 走 packaging 资产（小模型随仓）；球模型 172MB 不入仓，从仓库 models/ 取
+    # yolov8n 走 packaging 资产（小模型随仓）
     yolo_src = PACKAGING_DIR / "assets" / "models" / "yolov8n.pt"
     if not yolo_src.is_file():
         raise BuildError(f"yolov8n.pt 资产缺失: {yolo_src}")
     shutil.copy2(yolo_src, model_dst_dir / "yolov8n.pt")
     logger.info("models/yolov8n.pt 已拷贝: %s", model_dst_dir / "yolov8n.pt")
-    ball_src = REPO_ROOT / "models" / "abdullahtarek_ball.pt"
-    if not ball_src.is_file():
-        raise BuildError(f"球检测模型缺失: {ball_src}（mot_candidates 必需，从 models/ 补入）")
-    shutil.copy2(ball_src, model_dst_dir / "abdullahtarek_ball.pt")
-    logger.info("models/abdullahtarek_ball.pt 已拷贝: %s", model_dst_dir / "abdullahtarek_ball.pt")
+    # 反向守卫：球模型再分发权利未确认（AGENTS.md 红线），绝不进安装包
+    bundled_ball = model_dst_dir / "abdullahtarek_ball.pt"
+    if bundled_ball.exists():
+        raise BuildError(f"球检测模型不得随安装包分发（首运行自动下载）: {bundled_ball}")
     shutil.copy2(REPO_ROOT / "pyproject.toml", app_dir / "pyproject.toml")
     logger.info("pyproject.toml 已拷贝（diagnostics 版本解析用）")
 

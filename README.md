@@ -46,12 +46,12 @@ pip install ultralytics opencv-python numpy pillow open_clip_torch scikit-learn 
 
 ### 模型权重（不随仓库分发）
 
-`models/` 目录被 .gitignore 排除，需自行准备两个文件：
+`models/` 目录被 .gitignore 排除。球检测模型首次运行自动下载，yolov8n 需自行准备：
 
 | 文件 | 用途 | 获取方式 |
 |---|---|---|
 | `models/yolov8n.pt` | 人物检测（持球排除、裁图质量复检） | [ultralytics 官方 assets](https://github.com/ultralytics/assets/releases) 下载 `yolov8n.pt` 放入 |
-| `models/abdullahtarek_ball.pt` | 篮球/篮筐检测主力（Ball/Hoop/Player 三类） | 从作者项目 [abdullahtarek/basketball_analysis](https://github.com/abdullahtarek/basketball_analysis) README 中的 `ball_detector_model.pt` 下载链接获取，重命名为 `abdullahtarek_ball.pt` 放入 |
+| `models/abdullahtarek_ball.pt` | 篮球/篮筐检测主力（Ball/Hoop/Player 三类） | **首次运行检测时自动从作者发布页下载**（约 172MB，源自 [abdullahtarek/basketball_analysis](https://github.com/abdullahtarek/basketball_analysis) README 公布的 Google Drive 链接）；网络受限可设代理环境变量 `BASKETBALL_CLIP_HTTPS_PROXY`，或手动下载后重命名为 `abdullahtarek_ball.pt` 放入 |
 
 另外，认人聚类用的 CLIP 权重（open_clip ViT-B-32 / laion2b_s34b_b79k，safetensors 约 605MB）：安装包已内置，离线可用（运行时设 `HF_HUB_OFFLINE=1`，无需联网）；开发方式（pip 安装）则首次运行聚类时自动从 Hugging Face 下载，网络受限可设置代理环境变量（见配置节）。
 
@@ -136,7 +136,7 @@ python -m pytest -q
 - **本项目主代码**：[MIT](LICENSE)。
 - **ultralytics（YOLO 推理框架）及 `yolov8n.pt` 权重**：[AGPL-3.0](https://github.com/ultralytics/ultralytics/blob/main/LICENSE)。本项目以"按原样调用其公开接口"的方式使用并显式声明该依赖；**如需商用或闭源分发，请自行评估 AGPL 义务或购买 Ultralytics 企业许可**。
 - **ffmpeg**：开发方式由用户自备；安装包内嵌 [BtbN FFmpeg 构建](https://github.com/BtbN/FFmpeg-Builds)（**GPL 版本**，含 libx264/x265，许可文本随包附带；LGPL 构建编译时禁用 libx264，不可用）。请勿使用含 nonfree 组件的构建（如 gyan.dev full 版）随包分发。
-- **`abdullahtarek_ball.pt` 权重**：源自 [abdullahtarek/basketball_analysis](https://github.com/abdullahtarek/basketball_analysis)（训练数据为 Roboflow 公开数据集）。经查证（2026-09）：该项目 README 声明 MIT，但仓库中无 LICENSE 文件，权重经 Google Drive 单独分发且无独立许可声明，**再分发权利无法确认**——故该权重不随本仓库/安装包再分发，请用户按上文"模型权重"节自行从作者发布页下载。
+- **`abdullahtarek_ball.pt` 权重**：源自 [abdullahtarek/basketball_analysis](https://github.com/abdullahtarek/basketball_analysis)（训练数据为 Roboflow 公开数据集）。经查证（2026-09）：该项目 README 声明 MIT，但仓库中无 LICENSE 文件，权重经 Google Drive 单独分发且无独立许可声明，**再分发权利无法确认**——故该权重不随本仓库/安装包再分发，首次运行时由程序自动从作者发布页下载（也可手动下载放入 `models/`）。
 - **CLIP 权重**（open_clip ViT-B-32 / laion2b_s34b_b79k）：不随仓库分发；开发方式首次运行从 Hugging Face 自动下载，安装包已内置（离线可用）。
 - **insightface buffalo_l**（仅可选的 `--photo-match` 人脸匹配用）：**非商用许可**，介意者不要使用该开关。
 
@@ -146,4 +146,4 @@ python -m pytest -q
 
 - Entry point: `python scripts/video.py score|people|build|photo|clean`, or the browser GUI wizard `python -m gui`
 - Requires Python ≥ 3.10 and ffmpeg; model weights are not redistributed with the repo — see the "模型权重" section above for download sources
-- License: MIT for the project code. Note that the ultralytics dependency and YOLO weights are AGPL-3.0 (evaluate obligations or obtain an Ultralytics enterprise license for commercial use); the installer bundles the BtbN GPL ffmpeg build (with libx264); the `abdullahtarek_ball.pt` weights' redistribution terms could not be verified, so they are **not** redistributed — users download them from the author's project page.
+- License: MIT for the project code. Note that the ultralytics dependency and YOLO weights are AGPL-3.0 (evaluate obligations or obtain an Ultralytics enterprise license for commercial use); the installer bundles the BtbN GPL ffmpeg build (with libx264); the `abdullahtarek_ball.pt` weights' redistribution terms could not be verified, so they are **not** redistributed — on first run the app downloads them automatically from the author's project page (manual download into `models/` also works).

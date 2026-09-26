@@ -23,11 +23,13 @@ import time
 from bisect import bisect_left
 from dataclasses import dataclass, field
 from glob import glob
+from pathlib import Path
 from typing import Any
 
 from ultralytics import YOLO
 
 from geom import Box, coverage
+from model_fetch import ensure_ball_model
 from pipe_common import atomic_write_json, configure_logging, new_run_id
 
 logger = logging.getLogger(__name__)
@@ -772,7 +774,7 @@ def main() -> None:
     fids: list[str] = (
         sys.argv[1:] if len(sys.argv) > 1 else ["0011", "0020", "0030", "0040", "0128"]
     )
-    ball_model = YOLO(BALL_MODEL_PATH)
+    ball_model = YOLO(str(ensure_ball_model(Path(BALL_MODEL_PATH))))
     person_model = YOLO(PERSON_MODEL_PATH)
 
     for i, fid in enumerate(fids):

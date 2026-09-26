@@ -35,3 +35,7 @@ class ExternalApiError(BasketballPipelineError):
 
 class ModelUnavailableError(BasketballPipelineError):
     """方舟模型 ID 不可用（NotFound/未开通/Shutdown/无权限），应切换下一个候选模型。"""
+
+
+class ModelDownloadError(BasketballPipelineError):
+    """本地模型权重缺失且自动下载失败（重试耗尽或来源返回非权重内容）。"""
