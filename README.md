@@ -30,8 +30,8 @@ Windows 安装器内嵌 Python 运行时、ffmpeg 与模型权重，零配置开
 要求：Python ≥ 3.10、ffmpeg + ffprobe 在 PATH 中（推荐 [BtbN 的 GPL 构建](https://github.com/BtbN/FFmpeg-Builds/releases)，须含 libx264，见下文许可声明）。
 
 ```powershell
-git clone https://github.com/huangli/basketball-clip.git
-cd basketball-clip
+git clone https://github.com/huangli/basketball_clip.git
+cd basketball_clip
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 # torch 建议装 CPU 版（避免 PyPI 默认的 CUDA 大包）：

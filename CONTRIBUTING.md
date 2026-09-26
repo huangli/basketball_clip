@@ -4,15 +4,15 @@ basketball-clip 是一个篮球视频进球自动检测与集锦剪辑工具：�
 
 ## 报问题 / 提需求
 
-统一走 [GitHub Issues](https://github.com/huangli/basketball-clip/issues)（唯一反馈渠道）。报 bug 请用 **Bug 反馈** 模板，并按模板指引附上 GUI 顶栏 **"导出诊断日志"** 按钮产出的诊断 zip。
+统一走 [GitHub Issues](https://github.com/huangli/basketball_clip/issues)（唯一反馈渠道）。报 bug 请用 **Bug 反馈** 模板，并按模板指引附上 GUI 顶栏 **"导出诊断日志"** 按钮产出的诊断 zip。
 
 ## 环境搭建
 
 要求：Windows（开发主力平台）、Python ≥ 3.10、ffmpeg + ffprobe 在 PATH 中（推荐 [BtbN 的 GPL 构建](https://github.com/BtbN/FFmpeg-Builds/releases)，须含 libx264）。
 
 ```powershell
-git clone https://github.com/huangli/basketball-clip.git
-cd basketball-clip
+git clone https://github.com/huangli/basketball_clip.git
+cd basketball_clip
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 # torch 建议装 CPU 版（避免 PyPI 默认的 CUDA 大包）：
